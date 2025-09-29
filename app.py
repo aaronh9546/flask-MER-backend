@@ -69,8 +69,7 @@ chat_sessions = {}
 gemini_model = "gemini-2.5-pro"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
-# --- CORRECTED STARTUP LOGIC ---
-# This code now runs once when the app starts, replacing @app.before_first_request
+# --- Corrected Startup Logic ---
 def initialize_client():
     """Helper function to configure and return the GenAI client."""
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -81,8 +80,6 @@ def initialize_client():
     return genai.GenerativeModel(gemini_model)
 
 client = initialize_client()
-# --- END CORRECTION ---
-
 
 # --- Authentication Logic (Flask Decorators) ---
 
@@ -109,7 +106,6 @@ def token_required(f):
             return jsonify({"message": "Token is missing!"}), 401
         try:
             payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
-            # Validate payload against the User model
             user_data = {
                 "id": int(payload.get("sub")),
                 "email": payload.get("email"),
@@ -154,11 +150,10 @@ def issue_wordpress_token():
         return jsonify({"message": "Invalid user data"}), 400
 
 @app.route("/chat", methods=['POST'])
-# @token_required  # Decorator is disabled
+@token_required
 def chat_api():
-    # Replace the original user logic with a placeholder
-    print("Authentication bypassed for local testing.")
-    current_user = User(id=123, email="local-test@example.com", name="Test User")
+    current_user = g.current_user
+    print(f"Authenticated request from user: {current_user.email}")
     
     try:
         query = Query.model_validate(request.json)
@@ -182,26 +177,61 @@ def chat_api():
             yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
             analysis_result = analyze_studies(step_2_5_compact_data)
             
-            # --- START MODIFICATION ---
-            # Use model_dump(mode='json') to correctly serialize all sub-objects
             analysis_dict = analysis_result.model_dump(mode='json')
             
             conversation_id = str(uuid.uuid4())
             chat_sessions[conversation_id] = {
                 "user_id": current_user.id,
                 "original_query": user_query,
+                "studies_data": step_2_result,
+                "analysis_data_str": json.dumps(analysis_dict),
                 "analysis": analysis_dict
             }
 
             result_data = {"type": "result", "content": analysis_dict}
-            # --- END MODIFICATION ---
-
             yield f"data: {json.dumps(result_data)}\n\n"
             
             yield f"data: {json.dumps({'type': 'conversation_id', 'content': conversation_id})}\n\n"
             
         except Exception as e:
             print(f"An error occurred in the stream: {e}")
+            error_data = {"type": "error", "content": f"An error occurred: {str(e)}"}
+            yield f"data: {json.dumps(error_data)}\n\n"
+
+    return Response(event_generator(), mimetype='text-event-stream')
+
+@app.route("/followup", methods=['POST'])
+@token_required
+def followup_api():
+    current_user = g.current_user
+    print(f"Follow-up request from user: {current_user.email}")
+    
+    try:
+        data = request.json
+        conversation_id = data.get("conversation_id")
+        user_message = data.get("message")
+        if not conversation_id or not user_message:
+            raise ValueError("Missing conversation_id or message")
+    except (ValidationError, TypeError, ValueError):
+        return jsonify({"message": "Invalid request body"}), 400
+
+    session_data = chat_sessions.get(conversation_id)
+    if not session_data or session_data.get("user_id") != current_user.id:
+        def error_generator():
+            yield f"data: {json.dumps({'type': 'error', 'content': 'Conversation not found or access denied.'})}\n\n"
+        return Response(error_generator(), mimetype='text-event-stream')
+
+    def event_generator():
+        try:
+            followup_prompt = compose_followup_query(session_data, user_message)
+            response_stream = client.generate_content(followup_prompt, stream=True)
+            
+            for chunk in response_stream:
+                if chunk.text:
+                    yield f"data: {json.dumps({'type': 'message', 'content': chunk.text})}\n\n"
+
+        except Exception as e:
+            print(f"An error occurred in the followup stream: {e}")
             error_data = {"type": "error", "content": f"An error occurred: {str(e)}"}
             yield f"data: {json.dumps(error_data)}\n\n"
 
@@ -240,7 +270,7 @@ def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> Analysi
             response = client.generate_content(
                 step_3_query,
                 generation_config=generation_config,
-                request_options={"timeout": 300}  # 5 minute timeout
+                request_options={"timeout": 300}
             )
             response_json = json.loads(response.text)
             return AnalysisResponse.model_validate(response_json)
@@ -253,6 +283,21 @@ def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> Analysi
                 raise ValueError(f"Step 3 failed after {max_retries + 1} attempts. Last error: {last_error}")
 
 # --- Prompt Composition Functions ---
+
+def compose_followup_query(session_data: dict, new_message: str) -> str:
+    step_3_result = session_data.get('analysis_data_str', '{}')
+    step_2_result = session_data.get('studies_data', 'No data available.')
+
+    return (
+        "Answer this question: "
+        + new_message
+        + ". Use both the analysis here: "
+        + "\n1. "
+        + step_3_result
+        + " and the data here: "
+        + "\n2. "
+        + step_2_result
+    )
 
 def compose_step_one_query(user_query: str) -> str:
     return (
