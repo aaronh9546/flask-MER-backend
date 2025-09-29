@@ -353,7 +353,7 @@ def compose_step_one_query(user_query: str) -> str:
         + "\n1. lack a comparison or control group,"
         + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity"
         + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
-        + "\nInclude 7 high-quality studies, or if fewer than 7, the max available." 
+        + "\nInclude 30 high-quality studies, or if fewer than 30, the max available." 
         + "\nDo not add any explanatory text."
     )
 
