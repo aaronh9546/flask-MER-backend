@@ -224,11 +224,22 @@ def followup_api():
     def event_generator():
         try:
             followup_prompt = compose_followup_query(session_data, user_message)
+            
+            # --- TOKEN COUNTING ---
+            input_tokens = client.count_tokens(followup_prompt)
+            print(f"🪙 Followup Input Tokens: {input_tokens.total_tokens}")
+            
             response_stream = client.generate_content(followup_prompt, stream=True)
             
+            full_response = ""
             for chunk in response_stream:
                 if chunk.text:
+                    full_response += chunk.text
                     yield f"data: {json.dumps({'type': 'message', 'content': chunk.text})}\n\n"
+            
+            output_tokens = client.count_tokens(full_response)
+            print(f"🪙 Followup Output Tokens: {output_tokens.total_tokens}")
+            # --- END TOKEN COUNTING ---
 
         except Exception as e:
             print(f"An error occurred in the followup stream: {e}")
@@ -241,23 +252,50 @@ def followup_api():
 
 def get_studies(user_query: str) -> str:
     step_1_query = compose_step_one_query(user_query)
+    
+    input_tokens = client.count_tokens(step_1_query)
+    print(f"🪙 Step 1 Input Tokens: {input_tokens.total_tokens}")
+
     response = client.generate_content(step_1_query, request_options={"timeout": 300})
+    
+    output_tokens = client.count_tokens(response.text)
+    print(f"🪙 Step 1 Output Tokens: {output_tokens.total_tokens}")
+    
     return response.text
 
 def extract_studies_data(step_1_result: str) -> str:
     step_2_query = compose_step_two_query(step_1_result)
+    
+    input_tokens = client.count_tokens(step_2_query)
+    print(f"🪙 Step 2 Input Tokens: {input_tokens.total_tokens}")
+
     response = client.generate_content(step_2_query, request_options={"timeout": 300})
+    
+    output_tokens = client.count_tokens(response.text)
+    print(f"🪙 Step 2 Output Tokens: {output_tokens.total_tokens}")
+    
     return response.text
 
 def summarize_data_for_analysis(step_2_markdown: str) -> str:
     print("--- Step 2.5: Summarizing data for analysis ---")
     summarization_prompt = compose_step_two_point_five_query(step_2_markdown)
+    
+    input_tokens = client.count_tokens(summarization_prompt)
+    print(f"🪙 Step 2.5 Input Tokens: {input_tokens.total_tokens}")
+
     response = client.generate_content(summarization_prompt, request_options={"timeout": 300})
+    
+    output_tokens = client.count_tokens(response.text)
+    print(f"🪙 Step 2.5 Output Tokens: {output_tokens.total_tokens}")
+    
     print("✅ Data summarization complete.")
     return response.text
 
 def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> AnalysisResponse:
     step_3_query = compose_step_three_query(step_2_5_compact_data)
+    
+    input_tokens = client.count_tokens(step_3_query)
+    print(f"🪙 Step 3 Input Tokens: {input_tokens.total_tokens}")
     
     generation_config = genai.types.GenerationConfig(
         response_mime_type="application/json"
@@ -272,6 +310,10 @@ def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> Analysi
                 generation_config=generation_config,
                 request_options={"timeout": 300}
             )
+            
+            output_tokens = client.count_tokens(response.text)
+            print(f"🪙 Step 3 Output Tokens: {output_tokens.total_tokens}")
+
             response_json = json.loads(response.text)
             return AnalysisResponse.model_validate(response_json)
         except Exception as e:
