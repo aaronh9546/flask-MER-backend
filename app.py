@@ -163,8 +163,10 @@ def chat_api():
 
     def event_generator():
         try:
+            # --- MODIFICATION: Use json.dumps on the content string ---
             yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
             step_1_result = get_studies(user_query)
+            # Use json.dumps to escape any special characters in the AI's response
             yield f"data: {json.dumps({'type': 'step_result', 'step': 1, 'content': step_1_result})}\n\n"
 
             yield f"data: {json.dumps({'type': 'update', 'content': 'Extracting study data...'})}\n\n"
