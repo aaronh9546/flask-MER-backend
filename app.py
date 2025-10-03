@@ -69,7 +69,8 @@ chat_sessions = {}
 gemini_model = "gemini-2.5-pro"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
-# --- Corrected Startup Logic ---
+# --- CORRECTED STARTUP LOGIC ---
+# This code now runs once when the app starts, replacing @app.before_first_request
 def initialize_client():
     """Helper function to configure and return the GenAI client."""
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -80,6 +81,8 @@ def initialize_client():
     return genai.GenerativeModel(gemini_model)
 
 client = initialize_client()
+# --- END CORRECTION ---
+
 
 # --- Authentication Logic (Flask Decorators) ---
 
@@ -106,6 +109,7 @@ def token_required(f):
             return jsonify({"message": "Token is missing!"}), 401
         try:
             payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
+            # Validate payload against the User model
             user_data = {
                 "id": int(payload.get("sub")),
                 "email": payload.get("email"),
@@ -150,10 +154,11 @@ def issue_wordpress_token():
         return jsonify({"message": "Invalid user data"}), 400
 
 @app.route("/chat", methods=['POST'])
-@token_required
+# @token_required  # Decorator is disabled
 def chat_api():
-    current_user = g.current_user
-    print(f"Authenticated request from user: {current_user.email}")
+    # Replace the original user logic with a placeholder
+    print("Authentication bypassed for local testing.")
+    current_user = User(id=123, email="local-test@example.com", name="Test User")
     
     try:
         query = Query.model_validate(request.json)
@@ -163,10 +168,8 @@ def chat_api():
 
     def event_generator():
         try:
-            # --- MODIFICATION: Use json.dumps on the content string ---
             yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
             step_1_result = get_studies(user_query)
-            # Use json.dumps to escape any special characters in the AI's response
             yield f"data: {json.dumps({'type': 'step_result', 'step': 1, 'content': step_1_result})}\n\n"
 
             yield f"data: {json.dumps({'type': 'update', 'content': 'Extracting study data...'})}\n\n"
@@ -179,18 +182,20 @@ def chat_api():
             yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
             analysis_result = analyze_studies(step_2_5_compact_data)
             
+            # --- START MODIFICATION ---
+            # Use model_dump(mode='json') to correctly serialize all sub-objects
             analysis_dict = analysis_result.model_dump(mode='json')
             
             conversation_id = str(uuid.uuid4())
             chat_sessions[conversation_id] = {
                 "user_id": current_user.id,
                 "original_query": user_query,
-                "studies_data": step_2_result,
-                "analysis_data_str": json.dumps(analysis_dict),
                 "analysis": analysis_dict
             }
 
             result_data = {"type": "result", "content": analysis_dict}
+            # --- END MODIFICATION ---
+
             yield f"data: {json.dumps(result_data)}\n\n"
             
             yield f"data: {json.dumps({'type': 'conversation_id', 'content': conversation_id})}\n\n"
@@ -202,102 +207,27 @@ def chat_api():
 
     return Response(event_generator(), mimetype='text-event-stream')
 
-@app.route("/followup", methods=['POST'])
-@token_required
-def followup_api():
-    current_user = g.current_user
-    print(f"Follow-up request from user: {current_user.email}")
-    
-    try:
-        data = request.json
-        conversation_id = data.get("conversation_id")
-        user_message = data.get("message")
-        if not conversation_id or not user_message:
-            raise ValueError("Missing conversation_id or message")
-    except (ValidationError, TypeError, ValueError):
-        return jsonify({"message": "Invalid request body"}), 400
-
-    session_data = chat_sessions.get(conversation_id)
-    if not session_data or session_data.get("user_id") != current_user.id:
-        def error_generator():
-            yield f"data: {json.dumps({'type': 'error', 'content': 'Conversation not found or access denied.'})}\n\n"
-        return Response(error_generator(), mimetype='text-event-stream')
-
-    def event_generator():
-        try:
-            followup_prompt = compose_followup_query(session_data, user_message)
-            
-            # --- TOKEN COUNTING ---
-            input_tokens = client.count_tokens(followup_prompt)
-            print(f"🪙 Followup Input Tokens: {input_tokens.total_tokens}")
-            
-            response_stream = client.generate_content(followup_prompt, stream=True)
-            
-            full_response = ""
-            for chunk in response_stream:
-                if chunk.text:
-                    full_response += chunk.text
-                    yield f"data: {json.dumps({'type': 'message', 'content': chunk.text})}\n\n"
-            
-            output_tokens = client.count_tokens(full_response)
-            print(f"🪙 Followup Output Tokens: {output_tokens.total_tokens}")
-            # --- END TOKEN COUNTING ---
-
-        except Exception as e:
-            print(f"An error occurred in the followup stream: {e}")
-            error_data = {"type": "error", "content": f"An error occurred: {str(e)}"}
-            yield f"data: {json.dumps(error_data)}\n\n"
-
-    return Response(event_generator(), mimetype='text-event-stream')
-
 # --- MARA Logic (Synchronous Versions) ---
 
 def get_studies(user_query: str) -> str:
     step_1_query = compose_step_one_query(user_query)
-    
-    input_tokens = client.count_tokens(step_1_query)
-    print(f"🪙 Step 1 Input Tokens: {input_tokens.total_tokens}")
-
     response = client.generate_content(step_1_query, request_options={"timeout": 300})
-    
-    output_tokens = client.count_tokens(response.text)
-    print(f"🪙 Step 1 Output Tokens: {output_tokens.total_tokens}")
-    
     return response.text
 
 def extract_studies_data(step_1_result: str) -> str:
     step_2_query = compose_step_two_query(step_1_result)
-    
-    input_tokens = client.count_tokens(step_2_query)
-    print(f"🪙 Step 2 Input Tokens: {input_tokens.total_tokens}")
-
     response = client.generate_content(step_2_query, request_options={"timeout": 300})
-    
-    output_tokens = client.count_tokens(response.text)
-    print(f"🪙 Step 2 Output Tokens: {output_tokens.total_tokens}")
-    
     return response.text
 
 def summarize_data_for_analysis(step_2_markdown: str) -> str:
     print("--- Step 2.5: Summarizing data for analysis ---")
     summarization_prompt = compose_step_two_point_five_query(step_2_markdown)
-    
-    input_tokens = client.count_tokens(summarization_prompt)
-    print(f"🪙 Step 2.5 Input Tokens: {input_tokens.total_tokens}")
-
     response = client.generate_content(summarization_prompt, request_options={"timeout": 300})
-    
-    output_tokens = client.count_tokens(response.text)
-    print(f"🪙 Step 2.5 Output Tokens: {output_tokens.total_tokens}")
-    
     print("✅ Data summarization complete.")
     return response.text
 
 def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> AnalysisResponse:
     step_3_query = compose_step_three_query(step_2_5_compact_data)
-    
-    input_tokens = client.count_tokens(step_3_query)
-    print(f"🪙 Step 3 Input Tokens: {input_tokens.total_tokens}")
     
     generation_config = genai.types.GenerationConfig(
         response_mime_type="application/json"
@@ -310,12 +240,8 @@ def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> Analysi
             response = client.generate_content(
                 step_3_query,
                 generation_config=generation_config,
-                request_options={"timeout": 300}
+                request_options={"timeout": 300}  # 5 minute timeout
             )
-            
-            output_tokens = client.count_tokens(response.text)
-            print(f"🪙 Step 3 Output Tokens: {output_tokens.total_tokens}")
-
             response_json = json.loads(response.text)
             return AnalysisResponse.model_validate(response_json)
         except Exception as e:
@@ -327,21 +253,6 @@ def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> Analysi
                 raise ValueError(f"Step 3 failed after {max_retries + 1} attempts. Last error: {last_error}")
 
 # --- Prompt Composition Functions ---
-
-def compose_followup_query(session_data: dict, new_message: str) -> str:
-    step_3_result = session_data.get('analysis_data_str', '{}')
-    step_2_result = session_data.get('studies_data', 'No data available.')
-
-    return (
-        "Answer this question: "
-        + new_message
-        + ". Use both the analysis here: "
-        + "\n1. "
-        + step_3_result
-        + " and the data here: "
-        + "\n2. "
-        + step_2_result
-    )
 
 def compose_step_one_query(user_query: str) -> str:
     return (
@@ -355,7 +266,7 @@ def compose_step_one_query(user_query: str) -> str:
         + "\n1. lack a comparison or control group,"
         + "\n2. are purely correlational, that do not include either a randomized-controlled trial, quasi-experimental design, or regression discontinuity"
         + "\nFinally, return these studies in a list of highest quality to lowest, formatting that list by: 'Title, Authors, Date Published.' "
-        + "\nInclude 30 high-quality studies, or if fewer than 30, the max available." 
+        + "\nInclude 7 high-quality studies, or if fewer than 7, the max available." 
         + "\nDo not add any explanatory text."
     )
 
@@ -368,7 +279,7 @@ def compose_step_two_query(step_1_result: str) -> str:
         + "\n1. Sample size of treatment and comparison groups"
         + "\n2. Cluster sample sizes (i.e. size of classroom/school)"
         + "\n3. Intraclass correlation coefficient (ICC). If not provided, impute 0.20."
-        + "\n4. Effect size for each outcome (standardized mean difference, adjusted for pre-test if possible)."
+        + "\n4. Hedges' g effect size for each outcome (standardized mean difference, adjusted for pre-test if possible)."
         + "\n5. Study design (RCT, quasi-experimental, or RDD)."
         + "\nReturn only the spreadsheet data and nothing else. **Ensure there is one entry per study from the provided list and no duplicates.**"
     )
