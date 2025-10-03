@@ -4,6 +4,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from typing import Any
 
 from flask import Flask, request, jsonify, Response, g
 from flask_cors import CORS
@@ -40,10 +41,12 @@ class Confidence(enum.Enum):
             + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify."
         )
 
+# --- START MODIFICATION ---
 class AnalysisDetails(BaseModel):
-    regression_models: str
+    regression_models: Any  # Changed from str to Any to accept complex objects
     process: str
-    plots: str
+    plots: Any              # Changed from str to Any to accept complex objects
+# --- END MODIFICATION ---
 
 class AnalysisResponse(BaseModel):
     summary: str
@@ -61,7 +64,6 @@ CORS(app, supports_credentials=True, origins=[
 ])
 
 # --- Security and Authentication Configuration ---
-
 INTERNAL_SECRET_KEY = os.getenv("INTERNAL_SECRET_KEY", "YOUR_SUPER_SECRET_PRE_SHARED_KEY")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "a_different_strong_secret_for_jwt")
 ALGORITHM = "HS256"
