@@ -1,0 +1,7 @@
+Flask
+Flask-Cors
+Flask-Limiter
+pydantic
+python-jose[cryptography]
+google-generativeai
+gunicorn
