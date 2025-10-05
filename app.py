@@ -12,6 +12,7 @@ from flask import Flask, request, jsonify, Response, g
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_limiter.errors import RateLimitExceeded
 from pydantic import BaseModel, ValidationError
 from jose import JWTError, jwt
 import google.generativeai as genai
@@ -178,18 +179,13 @@ def issue_wordpress_token():
         return jsonify({"message": "Invalid user data"}), 400
 
 @app.route("/chat", methods=['POST'])
-# @limiter.limit("1 per 5 minutes") # <-- DECORATOR REMOVED
 @token_required
 def chat_api():
-    limit_string = "1 per 5 minutes"
-    
-    # Test if the limit has been breached
-    if not limiter.test(limit_string):
-        return jsonify({"error": "Rate limit exceeded"}), 429
-    
-    # If the test passes, record the hit
-    limiter.hit(limit_string)
-    
+    try:
+        limiter.check("1 per 5 minutes")
+    except RateLimitExceeded as e:
+        return jsonify({"error": f"Rate limit exceeded: {e.description}"}), 429
+
     current_user = g.current_user
     print(f"Authenticated request from user: {current_user.email}")
     
@@ -240,15 +236,12 @@ def chat_api():
     return Response(event_generator(), mimetype='text-event-stream')
 
 @app.route("/followup", methods=['POST'])
-# @limiter.limit("15 per hour") # <-- DECORATOR REMOVED
 @token_required
 def followup_api():
-    limit_string = "15 per hour"
-
-    if not limiter.test(limit_string):
-        return jsonify({"error": "Rate limit exceeded"}), 429
-    
-    limiter.hit(limit_string)
+    try:
+        limiter.check("15 per hour")
+    except RateLimitExceeded as e:
+        return jsonify({"error": f"Rate limit exceeded: {e.description}"}), 429
 
     current_user = g.current_user
     print(f"Follow-up request from user: {current_user.email}")
