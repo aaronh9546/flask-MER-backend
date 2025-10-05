@@ -181,13 +181,15 @@ def issue_wordpress_token():
 # @limiter.limit("1 per 5 minutes") # <-- DECORATOR REMOVED
 @token_required
 def chat_api():
-    # --- MANUAL RATE LIMIT CHECK ---
-    # This check now runs after the CORS preflight request is handled.
+    limit = limiter.limiter.parse("1 per 5 minutes")
     limit_key = get_user_id_from_token()
-    if not limiter.limiter.hit(limiter.limiter.parse("1 per 5 minutes"), limit_key):
-        limiter.limiter.get_or_create_rate_limit(limiter.limiter.parse("1 per 5 minutes"), limit_key) # Log the hit
+
+    # Test if the limit has been breached
+    if not limiter.limiter.test(limit, limit_key):
         return jsonify({"error": "Rate limit exceeded"}), 429
-    # ---
+    
+    # If the test passes, record the hit
+    limiter.limiter.hit(limit, limit_key)
     
     current_user = g.current_user
     print(f"Authenticated request from user: {current_user.email}")
@@ -242,12 +244,13 @@ def chat_api():
 # @limiter.limit("15 per hour") # <-- DECORATOR REMOVED
 @token_required
 def followup_api():
-    # --- MANUAL RATE LIMIT CHECK ---
+    limit = limiter.limiter.parse("15 per hour")
     limit_key = get_user_id_from_token()
-    if not limiter.limiter.hit(limiter.limiter.parse("15 per hour"), limit_key):
-        limiter.limiter.get_or_create_rate_limit(limiter.limiter.parse("15 per hour"), limit_key) # Log the hit
+
+    if not limiter.limiter.test(limit, limit_key):
         return jsonify({"error": "Rate limit exceeded"}), 429
-    # ---
+    
+    limiter.limiter.hit(limit, limit_key)
 
     current_user = g.current_user
     print(f"Follow-up request from user: {current_user.email}")
