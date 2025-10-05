@@ -18,16 +18,12 @@ import google.generativeai as genai
 
 # --- Sentry Initialization ---
 sentry_sdk.init(
-    dsn="SENTRY_DSN", 
+    dsn=os.getenv("SENTRY_DSN"), 
     integrations=[FlaskIntegration()],
-
     # Set traces_sample_rate to 1.0 to capture 100%
     # of transactions for performance monitoring.
     traces_sample_rate=1.0,
 )
-# ---
-
-
 
 # --- Pydantic Models (Data Schemas) ---
 
@@ -56,12 +52,10 @@ class Confidence(enum.Enum):
             + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify."
         )
 
-# --- START MODIFICATION ---
 class AnalysisDetails(BaseModel):
-    regression_models: Any  # Changed from str to Any to accept complex objects
+    regression_models: Any
     process: str
-    plots: Any              # Changed from str to Any to accept complex objects
-# --- END MODIFICATION ---
+    plots: Any
 
 class AnalysisResponse(BaseModel):
     summary: str
@@ -99,7 +93,7 @@ limiter = Limiter(
     get_user_id_from_token,
     app=app,
     default_limits=["200 per day", "50 per hour"],
-    storage_uri="memory://",
+    storage_uri=os.getenv("RATELIMIT_STORAGE_URI", "memory://"),
 )
 
 chat_sessions = {}
@@ -210,6 +204,7 @@ def chat_api():
             
             yield f"data: {json.dumps({'type': 'update', 'content': 'Compacting data for analysis...'})}\n\n"
             step_2_5_compact_data = summarize_data_for_analysis(step_2_result)
+            yield f"data: {json.dumps({'type': 'step_2_5_result', 'step': '2.5', 'content': step_2_5_compact_data})}\n\n"
 
             yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
             analysis_result = analyze_studies(step_2_5_compact_data)
@@ -230,6 +225,7 @@ def chat_api():
             yield f"data: {json.dumps({'type': 'conversation_id', 'content': conversation_id})}\n\n"
             
         except Exception as e:
+            sentry_sdk.capture_exception(e)
             print(f"An error occurred in the stream: {e}")
             error_data = {"type": "error", "content": f"An error occurred: {str(e)}"}
             yield f"data: {json.dumps(error_data)}\n\n"
@@ -277,6 +273,7 @@ def followup_api():
             print(f"🪙 Followup Output Tokens: {output_tokens.total_tokens}")
 
         except Exception as e:
+            sentry_sdk.capture_exception(e)
             print(f"An error occurred in the followup stream: {e}")
             error_data = {"type": "error", "content": f"An error occurred: {str(e)}"}
             yield f"data: {json.dumps(error_data)}\n\n"
