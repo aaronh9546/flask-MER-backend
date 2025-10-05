@@ -20,8 +20,6 @@ import google.generativeai as genai
 sentry_sdk.init(
     dsn=os.getenv("SENTRY_DSN"), 
     integrations=[FlaskIntegration()],
-    # Set traces_sample_rate to 1.0 to capture 100%
-    # of transactions for performance monitoring.
     traces_sample_rate=1.0,
 )
 
@@ -180,9 +178,17 @@ def issue_wordpress_token():
         return jsonify({"message": "Invalid user data"}), 400
 
 @app.route("/chat", methods=['POST'])
-@limiter.limit("1 per 5 minutes")
+# @limiter.limit("1 per 5 minutes") # <-- DECORATOR REMOVED
 @token_required
 def chat_api():
+    # --- MANUAL RATE LIMIT CHECK ---
+    # This check now runs after the CORS preflight request is handled.
+    limit_key = get_user_id_from_token()
+    if not limiter.limiter.hit(limiter.limiter.parse("1 per 5 minutes"), limit_key):
+        limiter.limiter.get_or_create_rate_limit(limiter.limiter.parse("1 per 5 minutes"), limit_key) # Log the hit
+        return jsonify({"error": "Rate limit exceeded"}), 429
+    # ---
+    
     current_user = g.current_user
     print(f"Authenticated request from user: {current_user.email}")
     
@@ -233,9 +239,16 @@ def chat_api():
     return Response(event_generator(), mimetype='text-event-stream')
 
 @app.route("/followup", methods=['POST'])
-@limiter.limit("15 per hour")
+# @limiter.limit("15 per hour") # <-- DECORATOR REMOVED
 @token_required
 def followup_api():
+    # --- MANUAL RATE LIMIT CHECK ---
+    limit_key = get_user_id_from_token()
+    if not limiter.limiter.hit(limiter.limiter.parse("15 per hour"), limit_key):
+        limiter.limiter.get_or_create_rate_limit(limiter.limiter.parse("15 per hour"), limit_key) # Log the hit
+        return jsonify({"error": "Rate limit exceeded"}), 429
+    # ---
+
     current_user = g.current_user
     print(f"Follow-up request from user: {current_user.email}")
     
