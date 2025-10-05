@@ -5,6 +5,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any
+import sentry_sdk
+from sentry_sdk.integrations.flask import FlaskIntegration
 
 from flask import Flask, request, jsonify, Response, g
 from flask_cors import CORS
@@ -13,6 +15,19 @@ from flask_limiter.util import get_remote_address
 from pydantic import BaseModel, ValidationError
 from jose import JWTError, jwt
 import google.generativeai as genai
+
+# --- Sentry Initialization ---
+sentry_sdk.init(
+    dsn="SENTRY_DSN", 
+    integrations=[FlaskIntegration()],
+
+    # Set traces_sample_rate to 1.0 to capture 100%
+    # of transactions for performance monitoring.
+    traces_sample_rate=1.0,
+)
+# ---
+
+
 
 # --- Pydantic Models (Data Schemas) ---
 
