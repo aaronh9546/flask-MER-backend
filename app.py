@@ -181,15 +181,14 @@ def issue_wordpress_token():
 # @limiter.limit("1 per 5 minutes") # <-- DECORATOR REMOVED
 @token_required
 def chat_api():
-    limit = limiter.limiter.parse("1 per 5 minutes")
-    limit_key = get_user_id_from_token()
-
+    limit_string = "1 per 5 minutes"
+    
     # Test if the limit has been breached
-    if not limiter.limiter.test(limit, limit_key):
+    if not limiter.test(limit_string):
         return jsonify({"error": "Rate limit exceeded"}), 429
     
     # If the test passes, record the hit
-    limiter.limiter.hit(limit, limit_key)
+    limiter.hit(limit_string)
     
     current_user = g.current_user
     print(f"Authenticated request from user: {current_user.email}")
@@ -244,13 +243,12 @@ def chat_api():
 # @limiter.limit("15 per hour") # <-- DECORATOR REMOVED
 @token_required
 def followup_api():
-    limit = limiter.limiter.parse("15 per hour")
-    limit_key = get_user_id_from_token()
+    limit_string = "15 per hour"
 
-    if not limiter.limiter.test(limit, limit_key):
+    if not limiter.test(limit_string):
         return jsonify({"error": "Rate limit exceeded"}), 429
     
-    limiter.limiter.hit(limit, limit_key)
+    limiter.hit(limit_string)
 
     current_user = g.current_user
     print(f"Follow-up request from user: {current_user.email}")
