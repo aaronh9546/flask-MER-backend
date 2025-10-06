@@ -7,12 +7,13 @@ from functools import wraps
 from typing import Any
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
+import redis
 
 from flask import Flask, request, jsonify, Response, g
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from flask_limiter.errors import RateLimitExceeded # Keep this import for error handling
+from flask_limiter.errors import RateLimitExceeded
 from pydantic import BaseModel, ValidationError
 from jose import JWTError, jwt
 import google.generativeai as genai
@@ -77,29 +78,28 @@ JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "a_different_strong_secret_for_jwt"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
-# --- Rate Limiter Setup ---
+# --- Redis and Rate Limiter Setup ---
+REDIS_URL = os.getenv("RATELIMIT_STORAGE_URI", "redis://localhost:6379")
+
+redis_client = redis.from_url(REDIS_URL)
+
 def get_user_id_from_context():
-    """Get the user ID from the Flask global context `g`."""
     try:
-        # The @token_required decorator will have already placed the user object in g
         return g.current_user.id
     except Exception:
-        # Fallback to IP address if something goes wrong or for unauthenticated routes
         return get_remote_address
 
 limiter = Limiter(
     get_user_id_from_context,
     app=app,
     default_limits=["200 per day", "50 per hour"],
-    storage_uri=os.getenv("RATELIMIT_STORAGE_URI", "memory://"),
+    storage_uri=REDIS_URL,
 )
 
-chat_sessions = {}
 gemini_model = "gemini-2.5-pro"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 def initialize_client():
-    """Helper function to configure and return the GenAI client."""
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     if not GEMINI_API_KEY:
         raise ValueError("FATAL: GEMINI_API_KEY environment variable not set.")
@@ -155,6 +155,11 @@ def internal_secret_required(f):
         return f(*args, **kwargs)
     return decorated
 
+# --- NEW HELPER FUNCTION ---
+def stream_event(data: dict) -> str:
+    """Formats a dictionary into a Server-Sent Event string."""
+    return f"data: {json.dumps(data)}\n\n"
+
 # --- API Endpoints ---
 
 @app.route("/auth/issue-wordpress-token", methods=['POST'])
@@ -192,41 +197,39 @@ def chat_api():
 
     def event_generator():
         try:
-            yield f"data: {json.dumps({'type': 'update', 'content': 'Finding relevant studies...'})}\n\n"
+            yield stream_event({'type': 'update', 'content': 'Finding relevant studies...'})
             step_1_result = get_studies(user_query)
-            yield f"data: {json.dumps({'type': 'step_result', 'step': 1, 'content': step_1_result})}\n\n"
+            yield stream_event({'type': 'step_result', 'step': 1, 'content': step_1_result})
 
-            yield f"data: {json.dumps({'type': 'update', 'content': 'Extracting study data...'})}\n\n"
+            yield stream_event({'type': 'update', 'content': 'Extracting study data...'})
             step_2_result = extract_studies_data(step_1_result)
-            yield f"data: {json.dumps({'type': 'step_result', 'step': 2, 'content': step_2_result})}\n\n"
+            yield stream_event({'type': 'step_result', 'step': 2, 'content': step_2_result})
             
-            yield f"data: {json.dumps({'type': 'update', 'content': 'Compacting data for analysis...'})}\n\n"
+            yield stream_event({'type': 'update', 'content': 'Compacting data for analysis...'})
             step_2_5_compact_data = summarize_data_for_analysis(step_2_result)
-            yield f"data: {json.dumps({'type': 'step_2_5_result', 'step': '2.5', 'content': step_2_5_compact_data})}\n\n"
+            yield stream_event({'type': 'step_2_5_result', 'step': '2.5', 'content': step_2_5_compact_data})
 
-            yield f"data: {json.dumps({'type': 'update', 'content': 'Analyzing study data...'})}\n\n"
+            yield stream_event({'type': 'update', 'content': 'Analyzing study data...'})
             analysis_result = analyze_studies(step_2_5_compact_data)
             
             analysis_dict = analysis_result.model_dump(mode='json')
             
             conversation_id = str(uuid.uuid4())
-            chat_sessions[conversation_id] = {
+            session_data_to_store = {
                 "user_id": current_user.id,
                 "original_query": user_query,
                 "studies_data": step_2_result, 
                 "analysis_data_str": json.dumps(analysis_dict)
             }
+            redis_client.set(f"session:{conversation_id}", json.dumps(session_data_to_store), ex=3600)
 
-            result_data = {"type": "result", "content": analysis_dict}
-            yield f"data: {json.dumps(result_data)}\n\n"
-            
-            yield f"data: {json.dumps({'type': 'conversation_id', 'content': conversation_id})}\n\n"
+            yield stream_event({"type": "result", "content": analysis_dict})
+            yield stream_event({'type': 'conversation_id', 'content': conversation_id})
             
         except Exception as e:
             sentry_sdk.capture_exception(e)
             print(f"An error occurred in the stream: {e}")
-            error_data = {"type": "error", "content": f"An error occurred: {str(e)}"}
-            yield f"data: {json.dumps(error_data)}\n\n"
+            yield stream_event({"type": "error", "content": f"An error occurred: {str(e)}"})
 
     return Response(event_generator(), mimetype='text-event-stream')
 
@@ -246,10 +249,17 @@ def followup_api():
     except (ValidationError, TypeError, ValueError):
         return jsonify({"message": "Invalid request body"}), 400
 
-    session_data = chat_sessions.get(conversation_id)
-    if not session_data or session_data.get("user_id") != current_user.id:
+    session_json = redis_client.get(f"session:{conversation_id}")
+    if not session_json:
         def error_generator():
-            yield f"data: {json.dumps({'type': 'error', 'content': 'Conversation not found or access denied.'})}\n\n"
+            yield stream_event({'type': 'error', 'content': 'Conversation not found or has expired.'})
+        return Response(error_generator(), mimetype='text-event-stream')
+    
+    session_data = json.loads(session_json)
+
+    if session_data.get("user_id") != current_user.id:
+        def error_generator():
+            yield stream_event({'type': 'error', 'content': 'Access denied to this conversation.'})
         return Response(error_generator(), mimetype='text-event-stream')
 
     def event_generator():
@@ -265,7 +275,7 @@ def followup_api():
             for chunk in response_stream:
                 if chunk.text:
                     full_response += chunk.text
-                    yield f"data: {json.dumps({'type': 'message', 'content': chunk.text})}\n\n"
+                    yield stream_event({'type': 'message', 'content': chunk.text})
             
             output_tokens = client.count_tokens(full_response)
             print(f"🪙 Followup Output Tokens: {output_tokens.total_tokens}")
@@ -273,8 +283,7 @@ def followup_api():
         except Exception as e:
             sentry_sdk.capture_exception(e)
             print(f"An error occurred in the followup stream: {e}")
-            error_data = {"type": "error", "content": f"An error occurred: {str(e)}"}
-            yield f"data: {json.dumps(error_data)}\n\n"
+            yield stream_event({"type": "error", "content": f"An error occurred: {str(e)}"})
 
     return Response(event_generator(), mimetype='text-event-stream')
 
