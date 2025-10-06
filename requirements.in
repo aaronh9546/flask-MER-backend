@@ -1,9 +1,9 @@
 Flask
 Flask-Cors
-Flask-Limiter
 pydantic
 python-jose[cryptography]
 google-generativeai
 gunicorn
-redis
 sentry-sdk[flask]
+redis
+Flask-Limiter
