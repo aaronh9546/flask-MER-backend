@@ -6,3 +6,4 @@ python-jose[cryptography]
 google-generativeai
 gunicorn
 redis
+sentry-sdk[flask]
