@@ -5,3 +5,4 @@ pydantic
 python-jose[cryptography]
 google-generativeai
 gunicorn
+redis
