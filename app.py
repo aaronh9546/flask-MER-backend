@@ -17,6 +17,7 @@ from flask_limiter.errors import RateLimitExceeded
 from pydantic import BaseModel, ValidationError
 from jose import JWTError, jwt
 import google.generativeai as genai
+from google.generativeai.types import Tool
 
 # --- Sentry Initialization ---
 sentry_sdk.init(
@@ -202,9 +203,8 @@ def chat_api():
 
             yield stream_event({'type': 'update', 'content': 'Finding relevant studies...'})
             step_1_result = get_studies(user_query)
-            step_1_result_id = f"{conversation_id}:step1"
-            redis_client.set(f"result:{step_1_result_id}", step_1_result, ex=600)
-            yield stream_event({'type': 'fetch_result', 'step': 1, 'url': f'/results/{step_1_result_id}'})
+            # Step 1 result is small and safe, so we stream it directly
+            yield stream_event({'type': 'step_result', 'step': 1, 'content': step_1_result})
 
             yield stream_event({'type': 'update', 'content': 'Extracting study data...'})
             step_2_structured_data = extract_studies_data(step_1_result)
@@ -347,7 +347,7 @@ def get_studies(user_query: str) -> str:
 def extract_studies_data(step_1_result: str) -> List[StudyData]:
     study_lines = [line.strip() for line in step_1_result.strip().split('\n') if line.strip()]
     
-    model_with_tools = genai.GenerativeModel(gemini_model, tools=[StudyData])
+    model_with_tools = genai.GenerativeModel(gemini_model, tools=[Tool.from_pydantic(StudyData)])
     study_data_list = []
 
     print(f"--- Step 2: Beginning extraction for {len(study_lines)} studies (one by one) ---")
@@ -409,7 +409,7 @@ def analyze_studies(step_2_5_compact_data: str) -> AnalysisResponse:
     input_tokens = client.count_tokens(step_3_query)
     print(f"🪙 Step 3 Input Tokens: {input_tokens.total_tokens}")
     
-    model_with_tools = genai.GenerativeModel(gemini_model, tools=[AnalysisResponse])
+    model_with_tools = genai.GenerativeModel(gemini_model, tools=[Tool.from_pydantic(AnalysisResponse)])
     
     try:
         print(f"--- Step 3: Analysis ---")
