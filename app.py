@@ -327,32 +327,43 @@ def get_studies(user_query: str) -> str:
     return response.text
 
 def extract_studies_data(step_1_result: str) -> List[StudyData]:
-    step_2_query = compose_step_two_query(step_1_result)
-    model_with_tools = genai.GenerativeModel(gemini_model, tools=[StudyData])
-
-    print("Extracting study data with Forced Tool Use...")
-    input_tokens = client.count_tokens(step_2_query)
-    print(f"🪙 Step 2 Input Tokens: {input_tokens.total_tokens}")
-
-    response = model_with_tools.generate_content(
-        step_2_query,
-        tool_config={'function_calling_config': 'ANY'},
-        request_options={"timeout": 300}
-    )
+    study_lines = [line.strip() for line in step_1_result.strip().split('\n') if line.strip()]
     
+    model_with_tools = genai.GenerativeModel(gemini_model, tools=[StudyData])
     study_data_list = []
-    if response.candidates and response.candidates[0].content.parts:
-        for part in response.candidates[0].content.parts:
-            if hasattr(part, 'function_call') and part.function_call.name == 'StudyData':
-                validated_study = StudyData.model_validate(part.function_call.args)
-                study_data_list.append(validated_study)
+
+    print(f"--- Step 2: Beginning extraction for {len(study_lines)} studies (one by one) ---")
+
+    for i, study_line in enumerate(study_lines):
+        print(f"Extracting data for study {i+1}/{len(study_lines)}: {study_line}")
+        
+        try:
+            step_2_query_single = compose_step_two_query(study_line)
+            
+            response = model_with_tools.generate_content(
+                step_2_query_single,
+                tool_config={'function_calling_config': 'ANY'},
+                request_options={"timeout": 120}
+            )
+            
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, 'function_call') and part.function_call.name == 'StudyData':
+                        validated_study = StudyData.model_validate(part.function_call.args)
+                        study_data_list.append(validated_study)
+                        print(f"  -> Success.")
+                        break
+        except Exception as e:
+            print(f"  -> Failed to extract data for study: {study_line}. Error: {e}")
+            sentry_sdk.capture_exception(e)
+            continue
 
     if not study_data_list:
-        error_message = f"Step 2 failed: Model did not return structured study data. Raw response: {response.text}"
+        error_message = f"Step 2 failed: Model was unable to extract data for any of the studies."
         sentry_sdk.capture_message(error_message)
         raise ValueError(error_message)
         
-    print(f"✅ Extracted data for {len(study_data_list)} studies.")
+    print(f"✅ Successfully extracted data for {len(study_data_list)} out of {len(study_lines)} studies.")
     return study_data_list
 
 def summarize_data_for_analysis(study_data_list: List[StudyData]) -> str:
@@ -391,10 +402,6 @@ def analyze_studies(step_2_5_compact_data: str) -> AnalysisResponse:
             raise ValueError("Model did not return the expected tool call.")
             
         validated_response = AnalysisResponse.model_validate(function_call.args)
-        
-        # You could count output tokens here if needed
-        # output_tokens = model_with_tools.count_tokens(response.candidates[0].content).total_tokens
-        # print(f"🪙 Step 3 Output Tokens: {output_tokens}")
         
         return validated_response
             
@@ -436,12 +443,14 @@ def compose_step_one_query(user_query: str) -> str:
         + "\nDo not add any explanatory text."
     )
 
-def compose_step_two_query(step_1_result: str) -> str:
+def compose_step_two_query(single_study_line: str) -> str:
+    """Creates a prompt to extract data for only ONE study."""
     return (
-        "You have been provided with a list of studies. For each study in the list, extract the relevant data by calling the `StudyData` tool. "
-        "You must call the tool one time for each study in the provided list.\n\n"
-        "LIST OF STUDIES:\n" 
-        + step_1_result
+        "You have been provided with information for a single academic study. "
+        "Look up the paper and extract the relevant data by calling the `StudyData` tool. "
+        "You must call the tool only once with the data for this specific study.\n\n"
+        "STUDY TO ANALYZE:\n" 
+        + single_study_line
     )
 
 def compose_step_two_point_five_query(structured_data_json: str) -> str:
