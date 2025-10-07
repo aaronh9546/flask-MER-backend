@@ -83,14 +83,18 @@ REDIS_URL = os.getenv("RATELIMIT_STORAGE_URI", "redis://localhost:6379")
 
 redis_client = redis.from_url(REDIS_URL)
 
-def get_user_id_from_context():
+def get_user_id_from_token():
+    """Extract user ID from JWT for rate limiting, fallback to IP."""
     try:
-        return g.current_user.id
+        token = request.headers['Authorization'].split(" ")[1]
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM], options={"verify_signature": False})
+        user_id = payload.get("sub")
+        return user_id if user_id else get_remote_address
     except Exception:
         return get_remote_address
 
 limiter = Limiter(
-    get_user_id_from_context,
+    get_user_id_from_token,
     app=app,
     default_limits=["200 per day", "50 per hour"],
     storage_uri=REDIS_URL,
@@ -100,6 +104,7 @@ gemini_model = "gemini-2.5-pro"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 def initialize_client():
+    """Helper function to configure and return the GenAI client."""
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     if not GEMINI_API_KEY:
         raise ValueError("FATAL: GEMINI_API_KEY environment variable not set.")
@@ -155,9 +160,9 @@ def internal_secret_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# --- NEW HELPER FUNCTION ---
+# --- Helper Function for Streaming ---
 def stream_event(data: dict) -> str:
-    """Formats a dictionary into a Server-Sent Event string."""
+    """Robustly formats a dictionary into a Server-Sent Event string."""
     return f"data: {json.dumps(data)}\n\n"
 
 # --- API Endpoints ---
@@ -184,8 +189,12 @@ def issue_wordpress_token():
 
 @app.route("/chat", methods=['POST'])
 @token_required
-@limiter.limit("1 per 5 minutes")
 def chat_api():
+    try:
+        limiter.check("1 per 5 minutes")
+    except RateLimitExceeded as e:
+        return jsonify({"error": f"Rate limit exceeded: {e.description}"}), 429
+
     current_user = g.current_user
     print(f"Authenticated request from user: {current_user.email}")
     
@@ -223,7 +232,9 @@ def chat_api():
             }
             redis_client.set(f"session:{conversation_id}", json.dumps(session_data_to_store), ex=3600)
 
-            yield stream_event({"type": "result", "content": analysis_dict})
+            result_data = {"type": "result", "content": analysis_dict}
+            yield stream_event(result_data)
+            
             yield stream_event({'type': 'conversation_id', 'content': conversation_id})
             
         except Exception as e:
@@ -235,8 +246,12 @@ def chat_api():
 
 @app.route("/followup", methods=['POST'])
 @token_required
-@limiter.limit("15 per hour")
 def followup_api():
+    try:
+        limiter.check("15 per hour")
+    except RateLimitExceeded as e:
+        return jsonify({"error": f"Rate limit exceeded: {e.description}"}), 429
+
     current_user = g.current_user
     print(f"Follow-up request from user: {current_user.email}")
     
@@ -328,11 +343,8 @@ def summarize_data_for_analysis(step_2_markdown: str) -> str:
     print(f"🪙 Step 2.5 Output Tokens: {output_tokens.total_tokens}")
     
     print("✅ Data summarization complete.")
-    
-    # --- START FIX: Remove newlines from the response ---
     cleaned_response = response.text.replace('\n', ' ').replace('\r', ' ')
     return cleaned_response
-    # --- END FIX ---
 
 def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> AnalysisResponse:
     step_3_query = compose_step_three_query(step_2_5_compact_data)
@@ -354,7 +366,6 @@ def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> Analysi
                 request_options={"timeout": 300}
             )
             
-            # --- START FIX: Remove newlines from the JSON string itself ---
             cleaned_json_string = response.text.replace('\n', ' ').replace('\r', ' ')
             
             output_tokens = client.count_tokens(cleaned_json_string)
@@ -362,8 +373,6 @@ def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> Analysi
 
             response_json = json.loads(cleaned_json_string)
             return AnalysisResponse.model_validate(response_json)
-            # --- END FIX ---
-            
         except Exception as e:
             print(f"🔴 Attempt {attempt + 1} failed. Error: {e}")
             last_error = e
