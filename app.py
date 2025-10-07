@@ -330,21 +330,27 @@ def extract_studies_data(step_1_result: str) -> List[StudyData]:
     step_2_query = compose_step_two_query(step_1_result)
     model_with_tools = genai.GenerativeModel(gemini_model, tools=[StudyData])
 
-    print("Extracting study data with Tool Use...")
+    print("Extracting study data with Forced Tool Use...")
     input_tokens = client.count_tokens(step_2_query)
     print(f"🪙 Step 2 Input Tokens: {input_tokens.total_tokens}")
 
-    response = model_with_tools.generate_content(step_2_query, request_options={"timeout": 300})
+    response = model_with_tools.generate_content(
+        step_2_query,
+        tool_config={'function_calling_config': 'ANY'},
+        request_options={"timeout": 300}
+    )
     
     study_data_list = []
-    if hasattr(response, 'function_calls') and response.function_calls:
-        for function_call in response.function_calls:
-            if function_call.name == 'StudyData':
-                validated_study = StudyData.model_validate(function_call.args)
+    if response.candidates and response.candidates[0].content.parts:
+        for part in response.candidates[0].content.parts:
+            if hasattr(part, 'function_call') and part.function_call.name == 'StudyData':
+                validated_study = StudyData.model_validate(part.function_call.args)
                 study_data_list.append(validated_study)
 
     if not study_data_list:
-        raise ValueError("Step 2 failed: Model did not return any structured study data.")
+        error_message = f"Step 2 failed: Model did not return structured study data. Raw response: {response.text}"
+        sentry_sdk.capture_message(error_message)
+        raise ValueError(error_message)
         
     print(f"✅ Extracted data for {len(study_data_list)} studies.")
     return study_data_list
@@ -385,6 +391,10 @@ def analyze_studies(step_2_5_compact_data: str) -> AnalysisResponse:
             raise ValueError("Model did not return the expected tool call.")
             
         validated_response = AnalysisResponse.model_validate(function_call.args)
+        
+        # You could count output tokens here if needed
+        # output_tokens = model_with_tools.count_tokens(response.candidates[0].content).total_tokens
+        # print(f"🪙 Step 3 Output Tokens: {output_tokens}")
         
         return validated_response
             
@@ -428,10 +438,10 @@ def compose_step_one_query(user_query: str) -> str:
 
 def compose_step_two_query(step_1_result: str) -> str:
     return (
-        common_persona_prompt
-        + "\nYou have been provided with a list of studies. For each study in the list, look up the paper and extract the relevant data by calling the `StudyData` tool. "
-        + "Call the tool once for each study found.\n\n"
-        + "Here is the list of studies:\n" + step_1_result
+        "You have been provided with a list of studies. For each study in the list, extract the relevant data by calling the `StudyData` tool. "
+        "You must call the tool one time for each study in the provided list.\n\n"
+        "LIST OF STUDIES:\n" 
+        + step_1_result
     )
 
 def compose_step_two_point_five_query(structured_data_json: str) -> str:
