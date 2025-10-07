@@ -81,20 +81,17 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 # --- Redis and Rate Limiter Setup ---
 REDIS_URL = os.getenv("RATELIMIT_STORAGE_URI", "redis://localhost:6379")
 
-redis_client = redis.from_url(REDIS_URL)
-
-def get_user_id_from_token():
-    """Extract user ID from JWT for rate limiting, fallback to IP."""
+def get_user_id_from_context():
+    """Get the user ID from the Flask global `g` object after authentication."""
     try:
-        token = request.headers['Authorization'].split(" ")[1]
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM], options={"verify_signature": False})
-        user_id = payload.get("sub")
-        return user_id if user_id else get_remote_address
-    except Exception:
+        # The @token_required decorator will have already placed the user object in g
+        return g.current_user.id
+    except AttributeError:
+        # Fallback to IP if the user is not logged in or for other routes
         return get_remote_address
 
 limiter = Limiter(
-    get_user_id_from_token,
+    get_user_id_from_context,
     app=app,
     default_limits=["200 per day", "50 per hour"],
     storage_uri=REDIS_URL,
@@ -113,6 +110,7 @@ def initialize_client():
     return genai.GenerativeModel(gemini_model)
 
 client = initialize_client()
+redis_client = redis.from_url(REDIS_URL)
 
 # --- Authentication Logic (Flask Decorators) ---
 
@@ -189,12 +187,8 @@ def issue_wordpress_token():
 
 @app.route("/chat", methods=['POST'])
 @token_required
+@limiter.limit("1 per 5 minutes")
 def chat_api():
-    try:
-        limiter.check("1 per 5 minutes")
-    except RateLimitExceeded as e:
-        return jsonify({"error": f"Rate limit exceeded: {e.description}"}), 429
-
     current_user = g.current_user
     print(f"Authenticated request from user: {current_user.email}")
     
@@ -246,12 +240,8 @@ def chat_api():
 
 @app.route("/followup", methods=['POST'])
 @token_required
+@limiter.limit("15 per hour")
 def followup_api():
-    try:
-        limiter.check("15 per hour")
-    except RateLimitExceeded as e:
-        return jsonify({"error": f"Rate limit exceeded: {e.description}"}), 429
-
     current_user = g.current_user
     print(f"Follow-up request from user: {current_user.email}")
     
