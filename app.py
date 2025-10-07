@@ -53,9 +53,10 @@ class Confidence(enum.Enum):
         )
 
 class AnalysisDetails(BaseModel):
-    regression_models: Any
+    # --- MODIFICATION: Make complex fields optional ---
     process: str
-    plots: Any
+    regression_models: Any | None = None # Field is now optional
+    plots: Any | None = None             # Field is now optional
 
 class AnalysisResponse(BaseModel):
     summary: str
@@ -209,7 +210,7 @@ def chat_api():
             
             yield stream_event({'type': 'update', 'content': 'Compacting data for analysis...'})
             step_2_5_compact_data = summarize_data_for_analysis(step_2_structured_data)
-            yield stream_event({'type': 'step_2_5_result', 'step': '2.5', 'content': step_2_5_compact_data})
+            # yield stream_event({'type': 'step_2_5_result', 'step': '2.5', 'content': step_2_5_compact_data})
 
             yield stream_event({'type': 'update', 'content': 'Analyzing study data...'})
             analysis_result = analyze_studies(step_2_5_compact_data)
