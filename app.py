@@ -84,10 +84,8 @@ REDIS_URL = os.getenv("RATELIMIT_STORAGE_URI", "redis://localhost:6379")
 def get_user_id_from_context():
     """Get the user ID from the Flask global `g` object after authentication."""
     try:
-        # The @token_required decorator will have already placed the user object in g
         return g.current_user.id
     except AttributeError:
-        # Fallback to IP if the user is not logged in or for other routes
         return get_remote_address
 
 limiter = Limiter(
@@ -305,7 +303,8 @@ def get_studies(user_query: str) -> str:
     output_tokens = client.count_tokens(response.text)
     print(f"🪙 Step 1 Output Tokens: {output_tokens.total_tokens}")
     
-    return response.text
+    cleaned_text = response.text.replace('"', "'")
+    return cleaned_text
 
 def extract_studies_data(step_1_result: str) -> str:
     step_2_query = compose_step_two_query(step_1_result)
@@ -318,7 +317,8 @@ def extract_studies_data(step_1_result: str) -> str:
     output_tokens = client.count_tokens(response.text)
     print(f"🪙 Step 2 Output Tokens: {output_tokens.total_tokens}")
     
-    return response.text
+    cleaned_text = response.text.replace('\n', ' ').replace('\r', ' ')
+    return cleaned_text
 
 def summarize_data_for_analysis(step_2_markdown: str) -> str:
     print("--- Step 2.5: Summarizing data for analysis ---")
@@ -333,7 +333,7 @@ def summarize_data_for_analysis(step_2_markdown: str) -> str:
     print(f"🪙 Step 2.5 Output Tokens: {output_tokens.total_tokens}")
     
     print("✅ Data summarization complete.")
-    cleaned_response = response.text.replace('\n', ' ').replace('\r', ' ')
+    cleaned_response = response.text.replace('\n', ' ').replace('\r', ' ').replace('"', "'")
     return cleaned_response
 
 def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> AnalysisResponse:
