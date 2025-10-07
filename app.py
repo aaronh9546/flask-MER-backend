@@ -328,7 +328,11 @@ def summarize_data_for_analysis(step_2_markdown: str) -> str:
     print(f"🪙 Step 2.5 Output Tokens: {output_tokens.total_tokens}")
     
     print("✅ Data summarization complete.")
-    return response.text
+    
+    # --- START FIX: Remove newlines from the response ---
+    cleaned_response = response.text.replace('\n', ' ').replace('\r', ' ')
+    return cleaned_response
+    # --- END FIX ---
 
 def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> AnalysisResponse:
     step_3_query = compose_step_three_query(step_2_5_compact_data)
@@ -350,11 +354,16 @@ def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> Analysi
                 request_options={"timeout": 300}
             )
             
-            output_tokens = client.count_tokens(response.text)
+            # --- START FIX: Remove newlines from the JSON string itself ---
+            cleaned_json_string = response.text.replace('\n', ' ').replace('\r', ' ')
+            
+            output_tokens = client.count_tokens(cleaned_json_string)
             print(f"🪙 Step 3 Output Tokens: {output_tokens.total_tokens}")
 
-            response_json = json.loads(response.text)
+            response_json = json.loads(cleaned_json_string)
             return AnalysisResponse.model_validate(response_json)
+            # --- END FIX ---
+            
         except Exception as e:
             print(f"🔴 Attempt {attempt + 1} failed. Error: {e}")
             last_error = e
