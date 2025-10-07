@@ -347,7 +347,11 @@ def get_studies(user_query: str) -> str:
 def extract_studies_data(step_1_result: str) -> List[StudyData]:
     study_lines = [line.strip() for line in step_1_result.strip().split('\n') if line.strip()]
     
-    model_with_tools = genai.GenerativeModel(gemini_model, tools=[Tool.from_pydantic(StudyData)])
+    # --- START CORRECTION ---
+    # The Pydantic model is passed directly to the tools list.
+    model_with_tools = genai.GenerativeModel(gemini_model, tools=[StudyData])
+    # --- END CORRECTION ---
+    
     study_data_list = []
 
     print(f"--- Step 2: Beginning extraction for {len(study_lines)} studies (one by one) ---")
@@ -384,6 +388,7 @@ def extract_studies_data(step_1_result: str) -> List[StudyData]:
     print(f"✅ Successfully extracted data for {len(study_data_list)} out of {len(study_lines)} studies.")
     return study_data_list
 
+
 def summarize_data_for_analysis(study_data_list: List[StudyData]) -> str:
     print("--- Step 2.5: Summarizing data for analysis ---")
     
@@ -409,7 +414,10 @@ def analyze_studies(step_2_5_compact_data: str) -> AnalysisResponse:
     input_tokens = client.count_tokens(step_3_query)
     print(f"🪙 Step 3 Input Tokens: {input_tokens.total_tokens}")
     
-    model_with_tools = genai.GenerativeModel(gemini_model, tools=[Tool.from_pydantic(AnalysisResponse)])
+    # --- START CORRECTION ---
+    # The Pydantic model is passed directly to the tools list.
+    model_with_tools = genai.GenerativeModel(gemini_model, tools=[AnalysisResponse])
+    # --- END CORRECTION ---
     
     try:
         print(f"--- Step 3: Analysis ---")
@@ -427,6 +435,7 @@ def analyze_studies(step_2_5_compact_data: str) -> AnalysisResponse:
         print(f"🔴 Step 3 failed. Error: {e}")
         sentry_sdk.capture_exception(e)
         raise ValueError(f"Step 3 failed. Last error: {e}")
+
 
 # --- Prompt Composition Functions ---
 
