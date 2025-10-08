@@ -17,7 +17,6 @@ from flask_limiter.errors import RateLimitExceeded
 from pydantic import BaseModel, ValidationError
 from jose import JWTError, jwt
 import google.generativeai as genai
-from google.generativeai.types import Tool
 
 # --- Sentry Initialization ---
 sentry_sdk.init(
@@ -203,19 +202,17 @@ def chat_api():
 
             yield stream_event({'type': 'update', 'content': 'Finding relevant studies...'})
             step_1_result = get_studies(user_query)
-            # Step 1 result is small and safe, so we stream it directly
             yield stream_event({'type': 'step_result', 'step': 1, 'content': step_1_result})
 
             yield stream_event({'type': 'update', 'content': 'Extracting study data...'})
             step_2_structured_data = extract_studies_data(step_1_result)
             step_2_markdown = studies_to_markdown(step_2_structured_data)
-            step_2_result_id = f"{conversation_id}:step2"
-            redis_client.set(f"result:{step_2_result_id}", step_2_markdown, ex=600)
-            yield stream_event({'type': 'fetch_result', 'step': 2, 'url': f'/results/{step_2_result_id}'})
+            yield stream_event({'type': 'step_result', 'step': 2, 'content': step_2_markdown})
             
             yield stream_event({'type': 'update', 'content': 'Compacting data for analysis...'})
             step_2_5_compact_data = summarize_data_for_analysis(step_2_structured_data)
-            
+            yield stream_event({'type': 'step_2_5_result', 'step': '2.5', 'content': step_2_5_compact_data})
+
             yield stream_event({'type': 'update', 'content': 'Analyzing study data...'})
             analysis_result = analyze_studies(step_2_5_compact_data)
             
@@ -347,11 +344,10 @@ def get_studies(user_query: str) -> str:
 def extract_studies_data(step_1_result: str) -> List[StudyData]:
     study_lines = [line.strip() for line in step_1_result.strip().split('\n') if line.strip()]
     
-    # --- START CORRECTION ---
-    # The Pydantic model is passed directly to the tools list.
-    model_with_tools = genai.GenerativeModel(gemini_model, tools=[StudyData])
-    # --- END CORRECTION ---
-    
+    tools = [genai.protos.Tool(
+        function_declarations=[genai.protos.FunctionDeclaration.from_pydantic(StudyData)]
+    )]
+    model_with_tools = genai.GenerativeModel(gemini_model, tools=tools)
     study_data_list = []
 
     print(f"--- Step 2: Beginning extraction for {len(study_lines)} studies (one by one) ---")
@@ -388,7 +384,6 @@ def extract_studies_data(step_1_result: str) -> List[StudyData]:
     print(f"✅ Successfully extracted data for {len(study_data_list)} out of {len(study_lines)} studies.")
     return study_data_list
 
-
 def summarize_data_for_analysis(study_data_list: List[StudyData]) -> str:
     print("--- Step 2.5: Summarizing data for analysis ---")
     
@@ -414,14 +409,18 @@ def analyze_studies(step_2_5_compact_data: str) -> AnalysisResponse:
     input_tokens = client.count_tokens(step_3_query)
     print(f"🪙 Step 3 Input Tokens: {input_tokens.total_tokens}")
     
-    # --- START CORRECTION ---
-    # The Pydantic model is passed directly to the tools list.
-    model_with_tools = genai.GenerativeModel(gemini_model, tools=[AnalysisResponse])
-    # --- END CORRECTION ---
+    tools = [genai.protos.Tool(
+        function_declarations=[genai.protos.FunctionDeclaration.from_pydantic(AnalysisResponse)]
+    )]
+    model_with_tools = genai.GenerativeModel(gemini_model, tools=tools)
     
     try:
         print(f"--- Step 3: Analysis ---")
-        response = model_with_tools.generate_content(step_3_query, request_options={"timeout": 300})
+        response = model_with_tools.generate_content(
+            step_3_query,
+            tool_config={'function_calling_config': 'ANY'},
+            request_options={"timeout": 300}
+        )
         
         function_call = response.candidates[0].content.parts[0].function_call
         if not function_call or not function_call.args:
@@ -435,7 +434,6 @@ def analyze_studies(step_2_5_compact_data: str) -> AnalysisResponse:
         print(f"🔴 Step 3 failed. Error: {e}")
         sentry_sdk.capture_exception(e)
         raise ValueError(f"Step 3 failed. Last error: {e}")
-
 
 # --- Prompt Composition Functions ---
 
