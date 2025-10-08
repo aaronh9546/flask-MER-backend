@@ -62,17 +62,6 @@ class AnalysisResponse(BaseModel):
     confidence: Confidence
     details: AnalysisDetails
 
-class StudyData(BaseModel):
-    """Represents the extracted data for a single study."""
-    study_author_year: str
-    n_treatment: str | None
-    n_comparison: str | None
-    cluster_info: str | None
-    icc: str | None
-    hedges_g_math: str | None
-    hedges_g_reading_ela: str | None
-    study_design: str | None
-
 # --- Application Setup ---
 
 app = Flask(__name__)
@@ -93,7 +82,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 REDIS_URL = os.getenv("RATELIMIT_STORAGE_URI", "redis://localhost:6379")
 
 def get_user_id_from_context():
-    """Get the user ID from the Flask global `g` object after authentication."""
     try:
         return g.current_user.id
     except AttributeError:
@@ -110,7 +98,6 @@ gemini_model = "gemini-2.5-pro"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 def initialize_client():
-    """Helper function to configure and return the GenAI client."""
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     if not GEMINI_API_KEY:
         raise ValueError("FATAL: GEMINI_API_KEY environment variable not set.")
@@ -198,19 +185,16 @@ def chat_api():
 
     def event_generator():
         try:
-            conversation_id = str(uuid.uuid4())
-
             yield stream_event({'type': 'update', 'content': 'Finding relevant studies...'})
             step_1_result = get_studies(user_query)
             yield stream_event({'type': 'step_result', 'step': 1, 'content': step_1_result})
 
             yield stream_event({'type': 'update', 'content': 'Extracting study data...'})
-            step_2_structured_data = extract_studies_data(step_1_result)
-            step_2_markdown = studies_to_markdown(step_2_structured_data)
-            yield stream_event({'type': 'step_result', 'step': 2, 'content': step_2_markdown})
+            step_2_result = extract_studies_data(step_1_result)
+            yield stream_event({'type': 'step_result', 'step': 2, 'content': step_2_result})
             
             yield stream_event({'type': 'update', 'content': 'Compacting data for analysis...'})
-            step_2_5_compact_data = summarize_data_for_analysis(step_2_structured_data)
+            step_2_5_compact_data = summarize_data_for_analysis(step_2_result)
             yield stream_event({'type': 'step_2_5_result', 'step': '2.5', 'content': step_2_5_compact_data})
 
             yield stream_event({'type': 'update', 'content': 'Analyzing study data...'})
@@ -218,10 +202,11 @@ def chat_api():
             
             analysis_dict = analysis_result.model_dump(mode='json')
             
+            conversation_id = str(uuid.uuid4())
             session_data_to_store = {
                 "user_id": current_user.id,
                 "original_query": user_query,
-                "studies_data": step_2_markdown,
+                "studies_data": step_2_result,
                 "analysis_data_str": json.dumps(analysis_dict)
             }
             redis_client.set(f"session:{conversation_id}", json.dumps(session_data_to_store), ex=3600)
@@ -237,20 +222,6 @@ def chat_api():
             yield stream_event({"type": "error", "content": f"An error occurred: {str(e)}"})
 
     return Response(event_generator(), mimetype='text-event-stream')
-
-@app.route("/results/<result_id>")
-@token_required
-def get_result(result_id):
-    try:
-        safe_result_id = f"result:{result_id.replace('..', '')}"
-        result_data = redis_client.get(safe_result_id)
-        if result_data:
-            return Response(result_data, mimetype='text/plain')
-        else:
-            return "Result not found or expired.", 404
-    except Exception as e:
-        sentry_sdk.capture_exception(e)
-        return "An error occurred while fetching the result.", 500
 
 @app.route("/followup", methods=['POST'])
 @token_required
@@ -306,25 +277,6 @@ def followup_api():
 
     return Response(event_generator(), mimetype='text-event-stream')
 
-# --- Helper Functions ---
-def studies_to_markdown(studies: List[StudyData]) -> str:
-    """Converts a list of StudyData objects into a markdown table string."""
-    headers = ["Study (Author, Year)", "N_Treatment", "N_Comparison", "Cluster_Info", "ICC", "Hedges_g_Math", "Hedges_g_Reading_ELA", "Study_Design"]
-    markdown = "| " + " | ".join(headers) + " |\n"
-    markdown += "| " + " | ".join(["---"] * len(headers)) + " |\n"
-    for study in studies:
-        row = [
-            study.study_author_year or "N/A",
-            study.n_treatment or "N/A",
-            study.n_comparison or "N/A",
-            study.cluster_info or "N/A",
-            study.icc or "N/A",
-            study.hedges_g_math or "N/A",
-            study.hedges_g_reading_ela or "N/A",
-            study.study_design or "N/A",
-        ]
-        markdown += "| " + " | ".join(row) + " |\n"
-    return markdown
 
 # --- MARA Logic (Synchronous Versions) ---
 
@@ -339,57 +291,27 @@ def get_studies(user_query: str) -> str:
     output_tokens = client.count_tokens(response.text)
     print(f"🪙 Step 1 Output Tokens: {output_tokens.total_tokens}")
     
-    return response.text
+    cleaned_text = response.text.replace('"', "'")
+    return cleaned_text
 
-def extract_studies_data(step_1_result: str) -> List[StudyData]:
-    study_lines = [line.strip() for line in step_1_result.strip().split('\n') if line.strip()]
+def extract_studies_data(step_1_result: str) -> str:
+    step_2_query = compose_step_two_query(step_1_result)
     
-    tools = [genai.protos.Tool(
-        function_declarations=[genai.protos.FunctionDeclaration.from_pydantic(StudyData)]
-    )]
-    model_with_tools = genai.GenerativeModel(gemini_model, tools=tools)
-    study_data_list = []
+    input_tokens = client.count_tokens(step_2_query)
+    print(f"🪙 Step 2 Input Tokens: {input_tokens.total_tokens}")
 
-    print(f"--- Step 2: Beginning extraction for {len(study_lines)} studies (one by one) ---")
+    response = client.generate_content(step_2_query, request_options={"timeout": 300})
+    
+    output_tokens = client.count_tokens(response.text)
+    print(f"🪙 Step 2 Output Tokens: {output_tokens.total_tokens}")
+    
+    cleaned_text = response.text.replace('\n', ' ').replace('\r', ' ')
+    return cleaned_text
 
-    for i, study_line in enumerate(study_lines):
-        print(f"Extracting data for study {i+1}/{len(study_lines)}: {study_line}")
-        
-        try:
-            step_2_query_single = compose_step_two_query(study_line)
-            
-            response = model_with_tools.generate_content(
-                step_2_query_single,
-                tool_config={'function_calling_config': 'ANY'},
-                request_options={"timeout": 120}
-            )
-            
-            if response.candidates and response.candidates[0].content.parts:
-                for part in response.candidates[0].content.parts:
-                    if hasattr(part, 'function_call') and part.function_call.name == 'StudyData':
-                        validated_study = StudyData.model_validate(part.function_call.args)
-                        study_data_list.append(validated_study)
-                        print(f"  -> Success.")
-                        break
-        except Exception as e:
-            print(f"  -> Failed to extract data for study: {study_line}. Error: {e}")
-            sentry_sdk.capture_exception(e)
-            continue
-
-    if not study_data_list:
-        error_message = f"Step 2 failed: Model was unable to extract data for any of the studies."
-        sentry_sdk.capture_message(error_message)
-        raise ValueError(error_message)
-        
-    print(f"✅ Successfully extracted data for {len(study_data_list)} out of {len(study_lines)} studies.")
-    return study_data_list
-
-def summarize_data_for_analysis(study_data_list: List[StudyData]) -> str:
+def summarize_data_for_analysis(step_2_markdown: str) -> str:
     print("--- Step 2.5: Summarizing data for analysis ---")
     
-    data_for_prompt = [study.model_dump(mode='json') for study in study_data_list]
-    
-    summarization_prompt = compose_step_two_point_five_query(json.dumps(data_for_prompt, indent=2))
+    summarization_prompt = compose_step_two_point_five_query(step_2_markdown)
     
     input_tokens = client.count_tokens(summarization_prompt)
     print(f"🪙 Step 2.5 Input Tokens: {input_tokens.total_tokens}")
@@ -400,40 +322,43 @@ def summarize_data_for_analysis(study_data_list: List[StudyData]) -> str:
     print(f"🪙 Step 2.5 Output Tokens: {output_tokens.total_tokens}")
     
     print("✅ Data summarization complete.")
-    cleaned_response = response.text.replace('\n', ' ').replace('\r', ' ')
+    cleaned_response = response.text.replace('\n', ' ').replace('\r', ' ').replace('"', "'")
     return cleaned_response
 
-def analyze_studies(step_2_5_compact_data: str) -> AnalysisResponse:
+def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> AnalysisResponse:
     step_3_query = compose_step_three_query(step_2_5_compact_data)
     
     input_tokens = client.count_tokens(step_3_query)
     print(f"🪙 Step 3 Input Tokens: {input_tokens.total_tokens}")
     
-    tools = [genai.protos.Tool(
-        function_declarations=[genai.protos.FunctionDeclaration.from_pydantic(AnalysisResponse)]
-    )]
-    model_with_tools = genai.GenerativeModel(gemini_model, tools=tools)
+    generation_config = genai.types.GenerationConfig(
+        response_mime_type="application/json"
+    )
     
-    try:
-        print(f"--- Step 3: Analysis ---")
-        response = model_with_tools.generate_content(
-            step_3_query,
-            tool_config={'function_calling_config': 'ANY'},
-            request_options={"timeout": 300}
-        )
-        
-        function_call = response.candidates[0].content.parts[0].function_call
-        if not function_call or not function_call.args:
-            raise ValueError("Model did not return the expected tool call.")
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            print(f"--- Step 3: Analysis, Attempt {attempt + 1}/{max_retries + 1} ---")
+            response = client.generate_content(
+                step_3_query,
+                generation_config=generation_config,
+                request_options={"timeout": 300}
+            )
             
-        validated_response = AnalysisResponse.model_validate(function_call.args)
-        
-        return validated_response
-            
-    except Exception as e:
-        print(f"🔴 Step 3 failed. Error: {e}")
-        sentry_sdk.capture_exception(e)
-        raise ValueError(f"Step 3 failed. Last error: {e}")
+            cleaned_json_string = response.text.replace('\n', ' ').replace('\r', ' ')
+
+            output_tokens = client.count_tokens(cleaned_json_string)
+            print(f"🪙 Step 3 Output Tokens: {output_tokens.total_tokens}")
+
+            response_json = json.loads(cleaned_json_string)
+            return AnalysisResponse.model_validate(response_json)
+        except Exception as e:
+            print(f"🔴 Attempt {attempt + 1} failed. Error: {e}")
+            last_error = e
+            if attempt < max_retries:
+                print("Retrying...")
+            else:
+                raise ValueError(f"Step 3 failed after {max_retries + 1} attempts. Last error: {last_error}")
 
 # --- Prompt Composition Functions ---
 
@@ -468,34 +393,54 @@ def compose_step_one_query(user_query: str) -> str:
         + "\nDo not add any explanatory text."
     )
 
-def compose_step_two_query(single_study_line: str) -> str:
-    """Creates a prompt to extract data for only ONE study."""
+def compose_step_two_query(step_1_result: str) -> str:
     return (
-        "You have been provided with information for a single academic study. "
-        "Look up the paper and extract the relevant data by calling the `StudyData` tool. "
-        "You must call the tool only once with the data for this specific study.\n\n"
-        "STUDY TO ANALYZE:\n" 
-        + single_study_line
+        common_persona_prompt
+        + " You have been provided with a definitive list of studies below. **Do not search for any other studies or add any studies not on this exact list.**"
+        + " For **only** the studies in this list, look up each paper:\n" + step_1_result
+        + "\nThen, extract the following data into a markdown table format: "
+        + "\n1. Sample size of treatment and comparison groups"
+        + "\n2. Cluster sample sizes (i.e. size of classroom/school)"
+        + "\n3. Intraclass correlation coefficient (ICC). If not provided, impute 0.20."
+        + "\n4. Hedges' g effect size for each outcome (standardized mean difference, adjusted for pre-test if possible)."
+        + "\n5. Study design (RCT, quasi-experimental, or RDD)."
+        + "\nReturn only the markdown table and nothing else. **Ensure there is one entry per study from the provided list and no duplicates.**"
     )
 
-def compose_step_two_point_five_query(structured_data_json: str) -> str:
+def compose_step_two_point_five_query(step_2_markdown: str) -> str:
     return (
-        "You are an expert data processing agent. You have been given a JSON object containing a list of academic studies. "
-        "Your task is to convert this structured data into a compact, machine-readable CSV (Comma-Separated Values) format. "
-        "The header row should be: "
-        "study_author_year,n_treatment,n_comparison,cluster_info,icc,hedges_g_math,hedges_g_reading_ela,study_design"
+        "You are an expert data processing agent. You have been given a markdown table containing data about academic studies. "
+        "Your task is to convert this table into a compact, machine-readable CSV (Comma-Separated Values) format. "
+        "Do not lose any information. Ensure the header row is simple and all subsequent rows contain the corresponding data points. "
         "Return only the raw CSV data and nothing else.\n\n"
-        "Here is the JSON data:\n"
-        f"{structured_data_json}"
+        "Here is the markdown table:\n"
+        f"{step_2_markdown}"
     )
 
 def compose_step_three_query(step_2_result: str) -> str:
+    json_structure_example = """
+{
+  "summary": "A one or two sentence summary of the analysis conclusion.",
+  "confidence": "GREEN",
+  "details": {
+    "process": "A description of the meta-analysis process used.",
+    "regression_models": "The specific meta-regression models produced, including coefficients and statistics.",
+    "plots": "A textual description of relevant plots, such as a forest plot or funnel plot."
+  }
+}
+"""
     return (
         common_persona_prompt
         + "\nUsing this CSV dataset of academic studies: \n" + step_2_result
-        + "\nPerform a meta-analysis using a multivariate meta-regression model. "
-        + "Then, call the analysis_response tool with your findings. "
-        + "Determine the confidence level based on these criteria: " + Confidence.get_description()
+        + "\nPerform a meta-analysis using a multivariate meta-regression model and return the results as a valid JSON object."
+        + "\n\n**CRITICAL REQUIREMENT:** Your response MUST be a single, valid JSON object that strictly adheres to the following structure and schema. Do not include any text, markdown formatting, or explanations outside of the JSON object itself."
+        + f"\n\nHere is an example of the required JSON structure:\n```json\n{json_structure_example}\n```"
+        + "\n\nNow, populate this exact JSON structure based on your analysis:"
+        + "\n1. For the `summary` field: Write a one or two sentence summary of your conclusion."
+        + "\n2. For the `confidence` field: Determine the confidence level (GREEN, YELLOW, or RED) based on these criteria: " + Confidence.get_description()
+        + "\n3. For the nested `details.process` field: Describe the analysis process you used."
+        + "\n4. For the nested `details.regression_models` field: Show the regression models produced."
+        + "\n5. For the nested `details.plots` field: Describe any corresponding plots."
     )
 
 if __name__ == "__main__":
