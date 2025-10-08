@@ -17,7 +17,6 @@ from flask_limiter.errors import RateLimitExceeded
 from pydantic import BaseModel, ValidationError
 from jose import JWTError, jwt
 import google.generativeai as genai
-from google.generativeai.types import Tool
 
 # --- Sentry Initialization ---
 sentry_sdk.init(
@@ -203,20 +202,17 @@ def chat_api():
 
             yield stream_event({'type': 'update', 'content': 'Finding relevant studies...'})
             step_1_result = get_studies(user_query)
-            step_1_result_id = f"{conversation_id}:step1"
-            redis_client.set(f"result:{step_1_result_id}", step_1_result, ex=600) # Expire in 10 mins
-            yield stream_event({'type': 'fetch_result', 'step': 1, 'url': f'/results/{step_1_result_id}'})
+            yield stream_event({'type': 'step_result', 'step': 1, 'content': step_1_result})
 
             yield stream_event({'type': 'update', 'content': 'Extracting study data...'})
             step_2_structured_data = extract_studies_data(step_1_result)
             step_2_markdown = studies_to_markdown(step_2_structured_data)
-            step_2_result_id = f"{conversation_id}:step2"
-            redis_client.set(f"result:{step_2_result_id}", step_2_markdown, ex=600)
-            yield stream_event({'type': 'fetch_result', 'step': 2, 'url': f'/results/{step_2_result_id}'})
+            yield stream_event({'type': 'step_result', 'step': 2, 'content': step_2_markdown})
             
             yield stream_event({'type': 'update', 'content': 'Compacting data for analysis...'})
             step_2_5_compact_data = summarize_data_for_analysis(step_2_structured_data)
-            
+            yield stream_event({'type': 'step_2_5_result', 'step': '2.5', 'content': step_2_5_compact_data})
+
             yield stream_event({'type': 'update', 'content': 'Analyzing study data...'})
             analysis_result = analyze_studies(step_2_5_compact_data)
             
@@ -246,7 +242,6 @@ def chat_api():
 @token_required
 def get_result(result_id):
     try:
-        # Sanitize the result_id to prevent path traversal attacks
         safe_result_id = f"result:{result_id.replace('..', '')}"
         result_data = redis_client.get(safe_result_id)
         if result_data:
@@ -349,8 +344,10 @@ def get_studies(user_query: str) -> str:
 def extract_studies_data(step_1_result: str) -> List[StudyData]:
     study_lines = [line.strip() for line in step_1_result.strip().split('\n') if line.strip()]
     
-    study_tool = Tool.from_pydantic(StudyData)
-    model_with_tools = genai.GenerativeModel(gemini_model, tools=[study_tool])
+    tools = [genai.protos.Tool(
+        function_declarations=[genai.protos.FunctionDeclaration.from_pydantic(StudyData)]
+    )]
+    model_with_tools = genai.GenerativeModel(gemini_model, tools=tools)
     study_data_list = []
 
     print(f"--- Step 2: Beginning extraction for {len(study_lines)} studies (one by one) ---")
@@ -412,8 +409,10 @@ def analyze_studies(step_2_5_compact_data: str) -> AnalysisResponse:
     input_tokens = client.count_tokens(step_3_query)
     print(f"🪙 Step 3 Input Tokens: {input_tokens.total_tokens}")
     
-    analysis_tool = Tool.from_pydantic(AnalysisResponse)
-    model_with_tools = genai.GenerativeModel(gemini_model, tools=[analysis_tool])
+    tools = [genai.protos.Tool(
+        function_declarations=[genai.protos.FunctionDeclaration.from_pydantic(AnalysisResponse)]
+    )]
+    model_with_tools = genai.GenerativeModel(gemini_model, tools=tools)
     
     try:
         print(f"--- Step 3: Analysis ---")
