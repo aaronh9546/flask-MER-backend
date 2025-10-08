@@ -17,6 +17,7 @@ from flask_limiter.errors import RateLimitExceeded
 from pydantic import BaseModel, ValidationError
 from jose import JWTError, jwt
 import google.generativeai as genai
+from google.generativeai.types import Tool
 
 # --- Sentry Initialization ---
 sentry_sdk.init(
@@ -344,10 +345,8 @@ def get_studies(user_query: str) -> str:
 def extract_studies_data(step_1_result: str) -> List[StudyData]:
     study_lines = [line.strip() for line in step_1_result.strip().split('\n') if line.strip()]
     
-    tools = [genai.protos.Tool(
-        function_declarations=[genai.protos.FunctionDeclaration.from_pydantic(StudyData)]
-    )]
-    model_with_tools = genai.GenerativeModel(gemini_model, tools=tools)
+    study_tool = Tool.from_pydantic(StudyData)
+    model_with_tools = genai.GenerativeModel(gemini_model, tools=[study_tool])
     study_data_list = []
 
     print(f"--- Step 2: Beginning extraction for {len(study_lines)} studies (one by one) ---")
@@ -409,10 +408,8 @@ def analyze_studies(step_2_5_compact_data: str) -> AnalysisResponse:
     input_tokens = client.count_tokens(step_3_query)
     print(f"🪙 Step 3 Input Tokens: {input_tokens.total_tokens}")
     
-    tools = [genai.protos.Tool(
-        function_declarations=[genai.protos.FunctionDeclaration.from_pydantic(AnalysisResponse)]
-    )]
-    model_with_tools = genai.GenerativeModel(gemini_model, tools=tools)
+    analysis_tool = Tool.from_pydantic(AnalysisResponse)
+    model_with_tools = genai.GenerativeModel(gemini_model, tools=[analysis_tool])
     
     try:
         print(f"--- Step 3: Analysis ---")
