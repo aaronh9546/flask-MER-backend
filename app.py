@@ -203,17 +203,20 @@ def chat_api():
 
             yield stream_event({'type': 'update', 'content': 'Finding relevant studies...'})
             step_1_result = get_studies(user_query)
-            yield stream_event({'type': 'step_result', 'step': 1, 'content': step_1_result})
+            step_1_result_id = f"{conversation_id}:step1"
+            redis_client.set(f"result:{step_1_result_id}", step_1_result, ex=600) # Expire in 10 mins
+            yield stream_event({'type': 'fetch_result', 'step': 1, 'url': f'/results/{step_1_result_id}'})
 
             yield stream_event({'type': 'update', 'content': 'Extracting study data...'})
             step_2_structured_data = extract_studies_data(step_1_result)
             step_2_markdown = studies_to_markdown(step_2_structured_data)
-            yield stream_event({'type': 'step_result', 'step': 2, 'content': step_2_markdown})
+            step_2_result_id = f"{conversation_id}:step2"
+            redis_client.set(f"result:{step_2_result_id}", step_2_markdown, ex=600)
+            yield stream_event({'type': 'fetch_result', 'step': 2, 'url': f'/results/{step_2_result_id}'})
             
             yield stream_event({'type': 'update', 'content': 'Compacting data for analysis...'})
             step_2_5_compact_data = summarize_data_for_analysis(step_2_structured_data)
-            yield stream_event({'type': 'step_2_5_result', 'step': '2.5', 'content': step_2_5_compact_data})
-
+            
             yield stream_event({'type': 'update', 'content': 'Analyzing study data...'})
             analysis_result = analyze_studies(step_2_5_compact_data)
             
@@ -243,6 +246,7 @@ def chat_api():
 @token_required
 def get_result(result_id):
     try:
+        # Sanitize the result_id to prevent path traversal attacks
         safe_result_id = f"result:{result_id.replace('..', '')}"
         result_data = redis_client.get(safe_result_id)
         if result_data:
