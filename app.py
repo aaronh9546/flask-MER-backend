@@ -62,16 +62,6 @@ class AnalysisResponse(BaseModel):
     confidence: Confidence
     details: AnalysisDetails
 
-class StudyData(BaseModel):
-    study_author_year: str
-    n_treatment: str | None
-    n_comparison: str | None
-    cluster_info: str | None
-    icc: str | None
-    hedges_g_math: str | None
-    hedges_g_reading_ela: str | None
-    study_design: str | None
-
 # --- Application Setup ---
 
 app = Flask(__name__)
@@ -92,6 +82,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 REDIS_URL = os.getenv("RATELIMIT_STORAGE_URI", "redis://localhost:6379")
 
 def get_user_id_from_context():
+    """Get the user ID from the Flask global `g` object after authentication."""
     try:
         return g.current_user.id
     except AttributeError:
@@ -108,6 +99,7 @@ gemini_model = "gemini-2.5-pro"
 common_persona_prompt = "You are a senior data analyst with a specialty in meta-analysis."
 
 def initialize_client():
+    """Helper function to configure and return the GenAI client."""
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     if not GEMINI_API_KEY:
         raise ValueError("FATAL: GEMINI_API_KEY environment variable not set.")
@@ -160,17 +152,10 @@ def internal_secret_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# --- Helper Function for Streaming & Logging ---
-def stream_and_log_event(conversation_id: str, step_name: str, data: dict) -> str:
-    """Formats data, logs it to Redis, and returns the SSE string."""
-    json_string = json.dumps(data)
-    try:
-        chunk_id = f"chunk:{conversation_id}:{step_name}:{uuid.uuid4()}"
-        redis_client.set(chunk_id, json_string, ex=3600)
-        print(f"📦 Logged chunk to Redis with ID: {chunk_id}")
-    except Exception as e:
-        print(f"🔴 Failed to log chunk to Redis: {e}")
-    return f"data: {json_string}\n\n"
+# --- Helper Function for Streaming ---
+def stream_event(data: dict) -> str:
+    """Robustly formats a dictionary into a Server-Sent Event string."""
+    return f"data: {json.dumps(data)}\n\n"
 
 # --- API Endpoints ---
 
@@ -201,50 +186,62 @@ def chat_api():
         return jsonify({"message": "Invalid request body"}), 400
 
     def event_generator():
-        conversation_id = str(uuid.uuid4())
         try:
-            yield stream_and_log_event(conversation_id, "update1", {'type': 'update', 'content': 'Finding relevant studies...'})
+            conversation_id = str(uuid.uuid4())
+
+            yield stream_event({'type': 'update', 'content': 'Finding relevant studies...'})
             step_1_result = get_studies(user_query)
-            yield stream_and_log_event(conversation_id, "step1", {'type': 'step_result', 'step': 1, 'content': step_1_result})
+            step_1_result_id = f"{conversation_id}:step1"
+            redis_client.set(f"result:{step_1_result_id}", step_1_result, ex=600)
+            yield stream_event({'type': 'fetch_result', 'url': f'/results/{step_1_result_id}'})
 
-            yield stream_and_log_event(conversation_id, "update2", {'type': 'update', 'content': 'Extracting study data...'})
+            yield stream_event({'type': 'update', 'content': 'Extracting study data...'})
             step_2_result = extract_studies_data(step_1_result)
-            yield stream_and_log_event(conversation_id, "step2", {'type': 'step_result', 'step': 2, 'content': step_2_result})
+            step_2_result_id = f"{conversation_id}:step2"
+            redis_client.set(f"result:{step_2_result_id}", step_2_result, ex=600)
+            yield stream_event({'type': 'fetch_result', 'url': f'/results/{step_2_result_id}'})
             
-            yield stream_and_log_event(conversation_id, "update2.5", {'type': 'update', 'content': 'Compacting data for analysis...'})
+            yield stream_event({'type': 'update', 'content': 'Compacting data for analysis...'})
             step_2_5_compact_data = summarize_data_for_analysis(step_2_result)
-            yield stream_and_log_event(conversation_id, "step2.5", {'type': 'step_2_5_result', 'step': '2.5', 'content': step_2_5_compact_data})
-
-            yield stream_and_log_event(conversation_id, "update3", {'type': 'update', 'content': 'Analyzing study data...'})
+            
+            yield stream_event({'type': 'update', 'content': 'Analyzing study data...'})
             analysis_result = analyze_studies(step_2_5_compact_data)
             
             analysis_dict = analysis_result.model_dump(mode='json')
             
-            session_data_to_store = { "user_id": current_user.id, "original_query": user_query, "studies_data": step_2_result, "analysis_data_str": json.dumps(analysis_dict) }
+            session_data_to_store = {
+                "user_id": current_user.id,
+                "original_query": user_query,
+                "studies_data": step_2_result,
+                "analysis_data_str": json.dumps(analysis_dict)
+            }
             redis_client.set(f"session:{conversation_id}", json.dumps(session_data_to_store), ex=3600)
 
             result_data = {"type": "result", "content": analysis_dict}
-            yield stream_and_log_event(conversation_id, "result", result_data)
+            yield stream_event(result_data)
             
-            yield stream_and_log_event(conversation_id, "conv_id", {'type': 'conversation_id', 'content': conversation_id})
+            yield stream_event({'type': 'conversation_id', 'content': conversation_id})
             
         except Exception as e:
             sentry_sdk.capture_exception(e)
             print(f"An error occurred in the stream: {e}")
-            yield stream_and_log_event(conversation_id, "error", {"type": "error", "content": f"An error occurred: {str(e)}"})
+            yield stream_event({"type": "error", "content": f"An error occurred: {str(e)}"})
 
     return Response(event_generator(), mimetype='text-event-stream')
 
-@app.route("/get-chunk/<path:chunk_id>")
-def get_chunk(chunk_id):
-    """An insecure endpoint to quickly retrieve a logged chunk for debugging."""
+@app.route("/results/<path:result_id>")
+@token_required
+def get_result(result_id):
     try:
-        data = redis_client.get(chunk_id)
-        if data:
-            return Response(data, mimetype='text/plain')
-        return "Chunk not found.", 404
+        safe_result_id = f"result:{result_id.replace('..', '')}"
+        result_data = redis_client.get(safe_result_id)
+        if result_data:
+            return Response(result_data, mimetype='text/plain')
+        else:
+            return "Result not found or expired.", 404
     except Exception as e:
-        return f"Error: {e}", 500
+        sentry_sdk.capture_exception(e)
+        return "An error occurred while fetching the result.", 500
 
 @app.route("/followup", methods=['POST'])
 @token_required
@@ -265,14 +262,14 @@ def followup_api():
     session_json = redis_client.get(f"session:{conversation_id}")
     if not session_json:
         def error_generator():
-            yield stream_and_log_event(conversation_id, "error_followup", {'type': 'error', 'content': 'Conversation not found or has expired.'})
+            yield stream_event({'type': 'error', 'content': 'Conversation not found or has expired.'})
         return Response(error_generator(), mimetype='text-event-stream')
     
     session_data = json.loads(session_json)
 
     if session_data.get("user_id") != current_user.id:
         def error_generator():
-            yield stream_and_log_event(conversation_id, "error_followup", {'type': 'error', 'content': 'Access denied to this conversation.'})
+            yield stream_event({'type': 'error', 'content': 'Access denied to this conversation.'})
         return Response(error_generator(), mimetype='text-event-stream')
 
     def event_generator():
@@ -288,7 +285,7 @@ def followup_api():
             for chunk in response_stream:
                 if chunk.text:
                     full_response += chunk.text
-                    yield stream_and_log_event(conversation_id, "followup_chunk", {'type': 'message', 'content': chunk.text})
+                    yield stream_event({'type': 'message', 'content': chunk.text})
             
             output_tokens = client.count_tokens(full_response)
             print(f"🪙 Followup Output Tokens: {output_tokens.total_tokens}")
@@ -296,7 +293,7 @@ def followup_api():
         except Exception as e:
             sentry_sdk.capture_exception(e)
             print(f"An error occurred in the followup stream: {e}")
-            yield stream_and_log_event(conversation_id, "error_followup", {"type": "error", "content": f"An error occurred: {str(e)}"})
+            yield stream_event({"type": "error", "content": f"An error occurred: {str(e)}"})
 
     return Response(event_generator(), mimetype='text-event-stream')
 
@@ -304,48 +301,74 @@ def followup_api():
 
 def get_studies(user_query: str) -> str:
     step_1_query = compose_step_one_query(user_query)
+    
     input_tokens = client.count_tokens(step_1_query)
     print(f"🪙 Step 1 Input Tokens: {input_tokens.total_tokens}")
+
     response = client.generate_content(step_1_query, request_options={"timeout": 300})
+    
     output_tokens = client.count_tokens(response.text)
     print(f"🪙 Step 1 Output Tokens: {output_tokens.total_tokens}")
-    return response.text
+    
+    cleaned_text = response.text.replace('"', "'")
+    return cleaned_text
 
 def extract_studies_data(step_1_result: str) -> str:
     step_2_query = compose_step_two_query(step_1_result)
+    
     input_tokens = client.count_tokens(step_2_query)
     print(f"🪙 Step 2 Input Tokens: {input_tokens.total_tokens}")
+
     response = client.generate_content(step_2_query, request_options={"timeout": 300})
+    
     output_tokens = client.count_tokens(response.text)
     print(f"🪙 Step 2 Output Tokens: {output_tokens.total_tokens}")
+    
     cleaned_text = response.text.replace('\n', ' ').replace('\r', ' ')
     return cleaned_text
 
 def summarize_data_for_analysis(step_2_markdown: str) -> str:
     print("--- Step 2.5: Summarizing data for analysis ---")
+    
     summarization_prompt = compose_step_two_point_five_query(step_2_markdown)
+    
     input_tokens = client.count_tokens(summarization_prompt)
     print(f"🪙 Step 2.5 Input Tokens: {input_tokens.total_tokens}")
+    
     response = client.generate_content(summarization_prompt, request_options={"timeout": 300})
+
     output_tokens = client.count_tokens(response.text)
     print(f"🪙 Step 2.5 Output Tokens: {output_tokens.total_tokens}")
+    
     print("✅ Data summarization complete.")
     cleaned_response = response.text.replace('\n', ' ').replace('\r', ' ').replace('"', "'")
     return cleaned_response
 
 def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> AnalysisResponse:
     step_3_query = compose_step_three_query(step_2_5_compact_data)
+    
     input_tokens = client.count_tokens(step_3_query)
     print(f"🪙 Step 3 Input Tokens: {input_tokens.total_tokens}")
-    generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
+    
+    generation_config = genai.types.GenerationConfig(
+        response_mime_type="application/json"
+    )
+    
     last_error = None
     for attempt in range(max_retries + 1):
         try:
             print(f"--- Step 3: Analysis, Attempt {attempt + 1}/{max_retries + 1} ---")
-            response = client.generate_content(step_3_query, generation_config=generation_config, request_options={"timeout": 300})
+            response = client.generate_content(
+                step_3_query,
+                generation_config=generation_config,
+                request_options={"timeout": 300}
+            )
+            
             cleaned_json_string = response.text.replace('\n', ' ').replace('\r', ' ')
+
             output_tokens = client.count_tokens(cleaned_json_string)
             print(f"🪙 Step 3 Output Tokens: {output_tokens.total_tokens}")
+
             response_json = json.loads(cleaned_json_string)
             return AnalysisResponse.model_validate(response_json)
         except Exception as e:
@@ -361,7 +384,17 @@ def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> Analysi
 def compose_followup_query(session_data: dict, new_message: str) -> str:
     step_3_result = session_data.get('analysis_data_str', '{}')
     step_2_result = session_data.get('studies_data', 'No data available.')
-    return ("Answer this question: " + new_message + ". Use both the analysis here: " + "\n1. " + step_3_result + " and the data here: " + "\n2. " + step_2_result)
+
+    return (
+        "Answer this question: "
+        + new_message
+        + ". Use both the analysis here: "
+        + "\n1. "
+        + step_3_result
+        + " and the data here: "
+        + "\n2. "
+        + step_2_result
+    )
 
 def compose_step_one_query(user_query: str) -> str:
     return (
