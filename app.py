@@ -355,26 +355,19 @@ def summarize_data_for_analysis(step_2_markdown: str) -> str:
 
 # In app.py, replace the entire create_forest_plot_base64 function with this one:
 
+# In app.py, replace the entire create_forest_plot_base64 function with this one:
+
 def create_forest_plot_base64(csv_data: str) -> str:
     """
     Parses CSV data of study results and generates a forest plot as a base64 encoded PNG.
+    This version includes robust cleaning for malformed AI-generated CSVs.
     """
-    print("--- STARTING PLOT GENERATION ---")
-    print("--- RAW CSV DATA RECEIVED ---")
-    print(csv_data)
-    print("-----------------------------\n")
-
     try:
         # Use StringIO to treat the string data as a file for pandas
+        # Added quotechar="'" to handle rows wrapped in single quotes.
+        # Added skipinitialspace=True to handle weird spacing.
         data_io = StringIO(csv_data)
-        df = pd.read_csv(data_io)
-
-        print("--- DATAFRAME AFTER INITIAL LOAD (FIRST 5 ROWS) ---")
-        print(df.head())
-        print("\n--- DATAFRAME INFO (TYPES AND NULLS) ---")
-        df.info()
-        print("-------------------------------------------\n")
-
+        df = pd.read_csv(data_io, quotechar="'", skipinitialspace=True)
 
         # --- Data Cleaning and Preparation ---
         df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
@@ -387,21 +380,22 @@ def create_forest_plot_base64(csv_data: str) -> str:
         if not all([effect_size_col, n_treat_col, n_ctrl_col]):
              raise ValueError("Could not find required columns (effect size, sample sizes) in the data.")
 
-        # Convert columns to numeric, coercing errors to NaN (Not a Number)
+        # --- ADVANCED CLEANING FOR AI-GENERATED DATA ---
+        for col in [effect_size_col, n_treat_col, n_ctrl_col]:
+            # Convert column to string to use string operations
+            df[col] = df[col].astype(str)
+            # Remove non-numeric characters like ≈, ~, +, ,, and text descriptions
+            # This regex keeps numbers, decimals, and negative signs.
+            df[col] = df[col].str.extract(r'([-\d\.]+)', expand=False)
+
+        # Now, convert the cleaned strings to numbers
         df[effect_size_col] = pd.to_numeric(df[effect_size_col], errors='coerce')
         df[n_treat_col] = pd.to_numeric(df[n_treat_col], errors='coerce')
         df[n_ctrl_col] = pd.to_numeric(df[n_ctrl_col], errors='coerce')
-        
-        print(f"--- DATAFRAME AFTER COERCING TO NUMERIC (ESSENTIAL COLUMNS) ---")
-        print(df[[study_col, effect_size_col, n_treat_col, n_ctrl_col]].head())
-        print("----------------------------------------------------------------\n")
 
-
-        # Drop rows where essential data is missing after coercion
+        # Drop rows where essential data is still missing after advanced cleaning
         df.dropna(subset=[effect_size_col, n_treat_col, n_ctrl_col], inplace=True)
         
-        print(f"--- FINAL DATAFRAME SIZE AFTER DROPPING NULLS: {len(df)} rows ---")
-
         if df.empty:
             raise ValueError("No valid study data available to plot after cleaning.")
 
