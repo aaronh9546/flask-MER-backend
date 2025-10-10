@@ -40,16 +40,16 @@ class FollowupQuery(BaseModel):
     message: str
 
 class Confidence(enum.Enum):
-    GREEN = "GREEN"
-    YELLOW = "YELLOW"
-    RED = "RED"
+    HIGH = "HIGH"
+    MODERATE = "MODERATE"
+    LOW = "LOW"
     
     @staticmethod
     def get_description():
         return (
-            "GREEN - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study."
-            + "\nYELLOW - If it meets all standards for “green” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies). Quasiexperimental studies (e.g., Regression Discontinuity Design) are those in which students have not been randomly assigned to treatment or control groups, but researchers are using statistical matching methods that allow them to speak with confidence about the likelihood that an intervention causes an outcome."
-            + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify."
+            "HIGH - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study."
+            + "\nMODERATE - If it meets all standards for “HIGH” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies). Quasiexperimental studies (e.g., Regression Discontinuity Design) are those in which students have not been randomly assigned to treatment or control groups, but researchers are using statistical matching methods that allow them to speak with confidence about the likelihood that an intervention causes an outcome."
+            + "\nLOW - The topic has a study that would have qualified for “HIGH” or “MODERATE” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify."
         )
 
 class AnalysisDetails(BaseModel):
@@ -440,7 +440,7 @@ def compose_step_three_query(step_2_result: str) -> str:
     json_structure_example = """
 {
   "summary": "A one or two sentence summary of the analysis conclusion.",
-  "confidence": "GREEN",
+  "confidence": "HIGH",
   "details": {
     "process": "A description of the meta-analysis process used.",
     "regression_models": "The specific meta-regression models produced, including coefficients and statistics.",
@@ -456,7 +456,7 @@ def compose_step_three_query(step_2_result: str) -> str:
         + f"\n\nHere is an example of the required JSON structure:\n```json\n{json_structure_example}\n```"
         + "\n\nNow, populate this exact JSON structure based on your analysis:"
         + "\n1. For the `summary` field: Write a one or two sentence summary of your conclusion."
-        + "\n2. For the `confidence` field: Determine the confidence level (GREEN, YELLOW, or RED) based on these criteria: " + Confidence.get_description()
+        + "\n2. For the `confidence` field: Determine the confidence level (HIGH, MODERATE, or LOW) based on these criteria: " + Confidence.get_description()
         + "\n3. For the nested `details.process` field: Describe the analysis process you used."
         + "\n4. For the nested `details.regression_models` field: Show the regression models produced."
         + "\n5. For the nested `details.plots` field: Describe any corresponding plots."
