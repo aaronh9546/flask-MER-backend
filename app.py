@@ -353,21 +353,32 @@ def summarize_data_for_analysis(step_2_markdown: str) -> str:
     cleaned_response = response.text.replace('\n', ' ').replace('\r', ' ').replace('"', "'")
     return cleaned_response
 
+# In app.py, replace the entire create_forest_plot_base64 function with this one:
+
 def create_forest_plot_base64(csv_data: str) -> str:
     """
     Parses CSV data of study results and generates a forest plot as a base64 encoded PNG.
     """
+    print("--- STARTING PLOT GENERATION ---")
+    print("--- RAW CSV DATA RECEIVED ---")
+    print(csv_data)
+    print("-----------------------------\n")
+
     try:
         # Use StringIO to treat the string data as a file for pandas
         data_io = StringIO(csv_data)
         df = pd.read_csv(data_io)
 
+        print("--- DATAFRAME AFTER INITIAL LOAD (FIRST 5 ROWS) ---")
+        print(df.head())
+        print("\n--- DATAFRAME INFO (TYPES AND NULLS) ---")
+        df.info()
+        print("-------------------------------------------\n")
+
+
         # --- Data Cleaning and Preparation ---
-        # Clean column names: remove leading/trailing spaces, convert to lowercase
         df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
 
-        # Find the relevant columns (names might vary slightly from the LLM)
-        # We need a study identifier, effect size, and sample sizes for control/treatment
         study_col = next((col for col in df.columns if 'study' in col or 'title' in col), df.columns[0])
         effect_size_col = next((col for col in df.columns if 'hedges' in col or 'effect_size' in col), None)
         n_treat_col = next((col for col in df.columns if 'treatment' in col and 'sample' in col), None)
@@ -380,49 +391,47 @@ def create_forest_plot_base64(csv_data: str) -> str:
         df[effect_size_col] = pd.to_numeric(df[effect_size_col], errors='coerce')
         df[n_treat_col] = pd.to_numeric(df[n_treat_col], errors='coerce')
         df[n_ctrl_col] = pd.to_numeric(df[n_ctrl_col], errors='coerce')
+        
+        print(f"--- DATAFRAME AFTER COERCING TO NUMERIC (ESSENTIAL COLUMNS) ---")
+        print(df[[study_col, effect_size_col, n_treat_col, n_ctrl_col]].head())
+        print("----------------------------------------------------------------\n")
+
 
         # Drop rows where essential data is missing after coercion
         df.dropna(subset=[effect_size_col, n_treat_col, n_ctrl_col], inplace=True)
         
+        print(f"--- FINAL DATAFRAME SIZE AFTER DROPPING NULLS: {len(df)} rows ---")
+
         if df.empty:
             raise ValueError("No valid study data available to plot after cleaning.")
 
         # --- Calculate Confidence Intervals ---
-        # Formula for variance of Hedges' g (approximated)
         df['variance'] = ((df[n_treat_col] + df[n_ctrl_col]) / (df[n_treat_col] * df[n_ctrl_col])) + \
                          (df[effect_size_col]**2 / (2 * (df[n_treat_col] + df[n_ctrl_col])))
         df['std_error'] = np.sqrt(df['variance'])
         
-        # 95% Confidence Interval
         z_score = 1.96
         df['ci_lower'] = df[effect_size_col] - z_score * df['std_error']
         df['ci_upper'] = df[effect_size_col] + z_score * df['std_error']
         
-        # Sort by effect size for a cleaner plot
         df.sort_values(by=effect_size_col, inplace=True)
 
         # --- Plotting ---
         plt.style.use('seaborn-v0_8-whitegrid')
-        fig, ax = plt.subplots(figsize=(10, len(df) * 0.5 + 2)) # Dynamic height
+        fig, ax = plt.subplots(figsize=(10, len(df) * 0.5 + 2))
 
-        # Plot points and confidence intervals
         ax.errorbar(
             x=df[effect_size_col],
             y=np.arange(len(df)),
             xerr=(df[effect_size_col] - df['ci_lower'], df['ci_upper'] - df[effect_size_col]),
-            fmt='o',  # 'o' for the point, '-' for the lines are drawn by xerr
-            ecolor='gray',
-            capsize=3,
-            label='Effect Size (95% CI)'
+            fmt='o', ecolor='gray', capsize=3, label='Effect Size (95% CI)'
         )
 
-        # Line of no effect
         ax.axvline(x=0, color='r', linestyle='--', label='Line of No Effect')
 
-        # Aesthetics
         ax.set_yticks(np.arange(len(df)))
         ax.set_yticklabels(df[study_col])
-        ax.invert_yaxis()  # First study at the top
+        ax.invert_yaxis()
         ax.set_xlabel("Hedges' g Effect Size")
         ax.set_ylabel("Study")
         ax.set_title("Forest Plot of Study Effect Sizes")
@@ -434,12 +443,11 @@ def create_forest_plot_base64(csv_data: str) -> str:
         plt.savefig(buf, format='png', bbox_inches='tight')
         buf.seek(0)
         img_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-        plt.close(fig) # Close the plot to free memory
+        plt.close(fig)
         return f"data:image/png;base64,{img_base64}"
 
     except Exception as e:
         print(f"🔴 Failed to generate forest plot: {e}")
-        # Return a textual description of the error if plotting fails
         return f"Could not generate plot. Reason: {str(e)}"
 
 def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> AnalysisResponse:
