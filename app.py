@@ -181,6 +181,7 @@ def issue_wordpress_token():
     except (ValidationError, TypeError, AttributeError):
         return jsonify({"message": "Invalid user data"}), 400
 
+# THIS IS THE UPDATED FUNCTION WITH FULL DIAGNOSTIC LOGGING
 @app.route("/chat", methods=['POST'])
 @token_required
 @limiter.limit("1 per 5 minutes")
@@ -197,24 +198,35 @@ def chat_api():
     def event_generator():
         try:
             conversation_id = str(uuid.uuid4())
+            
+            # --- START FULL PROCESS LOGGING ---
+            print("\n--- [START] Full Chat Process ---")
 
             yield stream_event({'type': 'update', 'content': 'Finding relevant studies...'})
+            print("--- [RUNNING] Step 1: get_studies ---")
             step_1_result = get_studies(user_query)
+            print("--- [SUCCESS] Step 1: get_studies ---")
             step_1_result_id = f"{conversation_id}:step1"
             redis_client.set(f"result:{step_1_result_id}", step_1_result, ex=600)
             yield stream_event({'type': 'fetch_result', 'url': f'/results/{step_1_result_id}'})
 
             yield stream_event({'type': 'update', 'content': 'Extracting study data...'})
+            print("--- [RUNNING] Step 2: extract_studies_data ---")
             step_2_result = extract_studies_data(step_1_result)
+            print("--- [SUCCESS] Step 2: extract_studies_data ---")
             step_2_result_id = f"{conversation_id}:step2"
             redis_client.set(f"result:{step_2_result_id}", step_2_result, ex=600)
             yield stream_event({'type': 'fetch_result', 'url': f'/results/{step_2_result_id}'})
             
             yield stream_event({'type': 'update', 'content': 'Compacting data for analysis...'})
+            print("--- [RUNNING] Step 2.5: summarize_data_for_analysis ---")
             step_2_5_compact_data = summarize_data_for_analysis(step_2_result)
+            print("--- [SUCCESS] Step 2.5: summarize_data_for_analysis ---")
             
             yield stream_event({'type': 'update', 'content': 'Analyzing study data...'})
+            print("--- [RUNNING] Step 3: analyze_studies ---")
             analysis_result = analyze_studies(step_2_5_compact_data)
+            print("--- [SUCCESS] Step 3: analyze_studies ---")
             
             analysis_dict = analysis_result.model_dump(mode='json')
             
@@ -230,13 +242,17 @@ def chat_api():
             yield stream_event(result_data)
             
             yield stream_event({'type': 'conversation_id', 'content': conversation_id})
+            print("--- [END] Full Chat Process ---")
+            # --- END FULL PROCESS LOGGING ---
             
         except Exception as e:
+            # This will now catch the specific error from whichever step failed
+            print(f"🔴🔴🔴 [FATAL ERROR] An exception occurred in the event_generator: {e} 🔴🔴🔴")
             sentry_sdk.capture_exception(e)
-            print(f"An error occurred in the stream: {e}")
-            yield stream_event({"type": "error", "content": f"An error occurred: {str(e)}"})
+            yield stream_event({"type": "error", "content": f"A critical error occurred in the backend: {str(e)}"})
 
     return Response(event_generator(), mimetype='text-event-stream')
+
 
 @app.route("/results/<path:result_id>")
 @token_required
@@ -337,7 +353,8 @@ def extract_studies_data(step_1_result: str) -> str:
     return cleaned_text
 
 def summarize_data_for_analysis(step_2_markdown: str) -> str:
-    print("--- Step 2.5: Summarizing data for analysis ---")
+    # This print statement is inside the function so we can remove it from chat_api's logs
+    # print("--- Step 2.5: Summarizing data for analysis ---")
     
     summarization_prompt = compose_step_two_point_five_query(step_2_markdown)
     
@@ -349,13 +366,9 @@ def summarize_data_for_analysis(step_2_markdown: str) -> str:
     output_tokens = client.count_tokens(response.text)
     print(f"🪙 Step 2.5 Output Tokens: {output_tokens.total_tokens}")
     
-    print("✅ Data summarization complete.")
+    # print("✅ Data summarization complete.")
     cleaned_response = response.text.replace('\n', ' ').replace('\r', ' ').replace('"', "'")
     return cleaned_response
-
-# In app.py, replace the entire create_forest_plot_base64 function with this one:
-
-# In app.py, replace the entire create_forest_plot_base64 function with this one:
 
 def create_forest_plot_base64(csv_data: str) -> str:
     """
@@ -441,6 +454,7 @@ def create_forest_plot_base64(csv_data: str) -> str:
         return f"data:image/png;base64,{img_base64}"
 
     except Exception as e:
+        # Keep this print statement as it's specific to plotting failure
         print(f"🔴 Failed to generate forest plot: {e}")
         return f"Could not generate plot. Reason: {str(e)}"
 
@@ -457,7 +471,6 @@ def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> Analysi
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            print(f"--- Step 3: Analysis, Attempt {attempt + 1}/{max_retries + 1} ---")
             response = client.generate_content(
                 step_3_query,
                 generation_config=generation_config,
@@ -471,19 +484,14 @@ def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> Analysi
 
             response_json = json.loads(cleaned_json_string)
             
-            # --- Generate the plot and add it to the new 'plots_image_base64' field ---
-            # The AI's textual description in 'plots_description' is preserved.
-            print("--- Generating Forest Plot ---")
             image_base64 = create_forest_plot_base64(step_2_5_compact_data)
             response_json['details']['plots_image_base64'] = image_base64
-            # --- End of plot generation ---
 
             return AnalysisResponse.model_validate(response_json)
         except Exception as e:
-            print(f"🔴 Attempt {attempt + 1} failed. Error: {e}")
             last_error = e
             if attempt < max_retries:
-                print("Retrying...")
+                print(f"Retrying Step 3 due to error: {e}")
             else:
                 raise ValueError(f"Step 3 failed after {max_retries + 1} attempts. Last error: {last_error}")
 
