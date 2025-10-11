@@ -18,14 +18,6 @@ from pydantic import BaseModel, ValidationError
 from jose import JWTError, jwt
 import google.generativeai as genai
 
-# For plotting and data handling
-import matplotlib.pyplot as plt
-import io
-import base64
-import pandas as pd
-from io import StringIO
-import numpy as np
-
 # --- Sentry Initialization ---
 sentry_sdk.init(
     dsn=os.getenv("SENTRY_DSN"), 
@@ -48,23 +40,22 @@ class FollowupQuery(BaseModel):
     message: str
 
 class Confidence(enum.Enum):
-    GREEN = "GREEN"
-    YELLOW = "YELLOW"
-    RED = "RED"
+    HIGH = "HIGH"
+    MODERATE = "MODERATE"
+    LOW = "LOW"
     
     @staticmethod
     def get_description():
         return (
-            "GREEN - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study."
-            + "\nYELLOW - If it meets all standards for “green” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies). Quasiexperimental studies (e.g., Regression Discontinuity Design) are those in which students have not been randomly assigned to treatment or control groups, but researchers are using statistical matching methods that allow them to speak with confidence about the likelihood that an intervention causes an outcome."
-            + "\nRED - The topic has a study that would have qualified for “green” or “yellow” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify."
+            "HIGH - If the research on the topic has a well-conducted, randomized study showing a statistically significant positive effect on at least one outcome measure (e.g., state test or national standardized test) analyzed at the proper level of clustering (class/school or student) with a multi-site sample of at least 350 participants. Strong evidence from at least one well-designed and wellimplemented experimental study."
+            + "\nMODERATE - If it meets all standards for “HIGH” stated above, except that instead of using a randomized design, qualifying studies are prospective quasi-experiments (i.e., matched studies). Quasiexperimental studies (e.g., Regression Discontinuity Design) are those in which students have not been randomly assigned to treatment or control groups, but researchers are using statistical matching methods that allow them to speak with confidence about the likelihood that an intervention causes an outcome."
+            + "\nLOW - The topic has a study that would have qualified for “HIGH” or “MODERATE” but did not because it failed to account for clustering (but did obtain significantly positive outcomes at the student level) or did not meet the sample size requirements. Post-hoc or retrospective studies may also qualify."
         )
 
 class AnalysisDetails(BaseModel):
     regression_models: Any | None = None
     process: str
-    plots_description: str | None = None 
-    plots_image_base64: str | None = None
+    plots: Any | None = None
 
 class AnalysisResponse(BaseModel):
     summary: str
@@ -181,7 +172,6 @@ def issue_wordpress_token():
     except (ValidationError, TypeError, AttributeError):
         return jsonify({"message": "Invalid user data"}), 400
 
-# THIS IS THE UPDATED FUNCTION WITH FULL DIAGNOSTIC LOGGING
 @app.route("/chat", methods=['POST'])
 @token_required
 @limiter.limit("1 per 5 minutes")
@@ -198,35 +188,24 @@ def chat_api():
     def event_generator():
         try:
             conversation_id = str(uuid.uuid4())
-            
-            # --- START FULL PROCESS LOGGING ---
-            print("\n--- [START] Full Chat Process ---")
 
             yield stream_event({'type': 'update', 'content': 'Finding relevant studies...'})
-            print("--- [RUNNING] Step 1: get_studies ---")
             step_1_result = get_studies(user_query)
-            print("--- [SUCCESS] Step 1: get_studies ---")
             step_1_result_id = f"{conversation_id}:step1"
             redis_client.set(f"result:{step_1_result_id}", step_1_result, ex=600)
             yield stream_event({'type': 'fetch_result', 'url': f'/results/{step_1_result_id}'})
 
             yield stream_event({'type': 'update', 'content': 'Extracting study data...'})
-            print("--- [RUNNING] Step 2: extract_studies_data ---")
             step_2_result = extract_studies_data(step_1_result)
-            print("--- [SUCCESS] Step 2: extract_studies_data ---")
             step_2_result_id = f"{conversation_id}:step2"
             redis_client.set(f"result:{step_2_result_id}", step_2_result, ex=600)
             yield stream_event({'type': 'fetch_result', 'url': f'/results/{step_2_result_id}'})
             
             yield stream_event({'type': 'update', 'content': 'Compacting data for analysis...'})
-            print("--- [RUNNING] Step 2.5: summarize_data_for_analysis ---")
             step_2_5_compact_data = summarize_data_for_analysis(step_2_result)
-            print("--- [SUCCESS] Step 2.5: summarize_data_for_analysis ---")
             
             yield stream_event({'type': 'update', 'content': 'Analyzing study data...'})
-            print("--- [RUNNING] Step 3: analyze_studies ---")
             analysis_result = analyze_studies(step_2_5_compact_data)
-            print("--- [SUCCESS] Step 3: analyze_studies ---")
             
             analysis_dict = analysis_result.model_dump(mode='json')
             
@@ -242,17 +221,13 @@ def chat_api():
             yield stream_event(result_data)
             
             yield stream_event({'type': 'conversation_id', 'content': conversation_id})
-            print("--- [END] Full Chat Process ---")
-            # --- END FULL PROCESS LOGGING ---
             
         except Exception as e:
-            # This will now catch the specific error from whichever step failed
-            print(f"🔴🔴🔴 [FATAL ERROR] An exception occurred in the event_generator: {e} 🔴🔴🔴")
             sentry_sdk.capture_exception(e)
-            yield stream_event({"type": "error", "content": f"A critical error occurred in the backend: {str(e)}"})
+            print(f"An error occurred in the stream: {e}")
+            yield stream_event({"type": "error", "content": f"An error occurred: {str(e)}"})
 
     return Response(event_generator(), mimetype='text-event-stream')
-
 
 @app.route("/results/<path:result_id>")
 @token_required
@@ -353,8 +328,7 @@ def extract_studies_data(step_1_result: str) -> str:
     return cleaned_text
 
 def summarize_data_for_analysis(step_2_markdown: str) -> str:
-    # This print statement is inside the function so we can remove it from chat_api's logs
-    # print("--- Step 2.5: Summarizing data for analysis ---")
+    print("--- Step 2.5: Summarizing data for analysis ---")
     
     summarization_prompt = compose_step_two_point_five_query(step_2_markdown)
     
@@ -366,97 +340,9 @@ def summarize_data_for_analysis(step_2_markdown: str) -> str:
     output_tokens = client.count_tokens(response.text)
     print(f"🪙 Step 2.5 Output Tokens: {output_tokens.total_tokens}")
     
-    # print("✅ Data summarization complete.")
+    print("✅ Data summarization complete.")
     cleaned_response = response.text.replace('\n', ' ').replace('\r', ' ').replace('"', "'")
     return cleaned_response
-
-def create_forest_plot_base64(csv_data: str) -> str:
-    """
-    Parses CSV data of study results and generates a forest plot as a base64 encoded PNG.
-    This version includes robust cleaning for malformed AI-generated CSVs.
-    """
-    try:
-        # Use StringIO to treat the string data as a file for pandas
-        # Added quotechar="'" to handle rows wrapped in single quotes.
-        # Added skipinitialspace=True to handle weird spacing.
-        data_io = StringIO(csv_data)
-        df = pd.read_csv(data_io, quotechar="'", skipinitialspace=True)
-
-        # --- Data Cleaning and Preparation ---
-        df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
-
-        study_col = next((col for col in df.columns if 'study' in col or 'title' in col), df.columns[0])
-        effect_size_col = next((col for col in df.columns if 'hedges' in col or 'effect_size' in col), None)
-        n_treat_col = next((col for col in df.columns if 'treatment' in col and 'sample' in col), None)
-        n_ctrl_col = next((col for col in df.columns if 'comparison' in col or 'control' in col), None)
-
-        if not all([effect_size_col, n_treat_col, n_ctrl_col]):
-             raise ValueError("Could not find required columns (effect size, sample sizes) in the data.")
-
-        # --- ADVANCED CLEANING FOR AI-GENERATED DATA ---
-        for col in [effect_size_col, n_treat_col, n_ctrl_col]:
-            # Convert column to string to use string operations
-            df[col] = df[col].astype(str)
-            # Remove non-numeric characters like ≈, ~, +, ,, and text descriptions
-            # This regex keeps numbers, decimals, and negative signs.
-            df[col] = df[col].str.extract(r'([-\d\.]+)', expand=False)
-
-        # Now, convert the cleaned strings to numbers
-        df[effect_size_col] = pd.to_numeric(df[effect_size_col], errors='coerce')
-        df[n_treat_col] = pd.to_numeric(df[n_treat_col], errors='coerce')
-        df[n_ctrl_col] = pd.to_numeric(df[n_ctrl_col], errors='coerce')
-
-        # Drop rows where essential data is still missing after advanced cleaning
-        df.dropna(subset=[effect_size_col, n_treat_col, n_ctrl_col], inplace=True)
-        
-        if df.empty:
-            raise ValueError("No valid study data available to plot after cleaning.")
-
-        # --- Calculate Confidence Intervals ---
-        df['variance'] = ((df[n_treat_col] + df[n_ctrl_col]) / (df[n_treat_col] * df[n_ctrl_col])) + \
-                         (df[effect_size_col]**2 / (2 * (df[n_treat_col] + df[n_ctrl_col])))
-        df['std_error'] = np.sqrt(df['variance'])
-        
-        z_score = 1.96
-        df['ci_lower'] = df[effect_size_col] - z_score * df['std_error']
-        df['ci_upper'] = df[effect_size_col] + z_score * df['std_error']
-        
-        df.sort_values(by=effect_size_col, inplace=True)
-
-        # --- Plotting ---
-        plt.style.use('seaborn-v0_8-whitegrid')
-        fig, ax = plt.subplots(figsize=(10, len(df) * 0.5 + 2))
-
-        ax.errorbar(
-            x=df[effect_size_col],
-            y=np.arange(len(df)),
-            xerr=(df[effect_size_col] - df['ci_lower'], df['ci_upper'] - df[effect_size_col]),
-            fmt='o', ecolor='gray', capsize=3, label='Effect Size (95% CI)'
-        )
-
-        ax.axvline(x=0, color='r', linestyle='--', label='Line of No Effect')
-
-        ax.set_yticks(np.arange(len(df)))
-        ax.set_yticklabels(df[study_col])
-        ax.invert_yaxis()
-        ax.set_xlabel("Hedges' g Effect Size")
-        ax.set_ylabel("Study")
-        ax.set_title("Forest Plot of Study Effect Sizes")
-        ax.legend()
-        plt.tight_layout()
-
-        # --- Convert plot to base64 ---
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight')
-        buf.seek(0)
-        img_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-        plt.close(fig)
-        return f"data:image/png;base64,{img_base64}"
-
-    except Exception as e:
-        # Keep this print statement as it's specific to plotting failure
-        print(f"🔴 Failed to generate forest plot: {e}")
-        return f"Could not generate plot. Reason: {str(e)}"
 
 def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> AnalysisResponse:
     step_3_query = compose_step_three_query(step_2_5_compact_data)
@@ -471,6 +357,7 @@ def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> Analysi
     last_error = None
     for attempt in range(max_retries + 1):
         try:
+            print(f"--- Step 3: Analysis, Attempt {attempt + 1}/{max_retries + 1} ---")
             response = client.generate_content(
                 step_3_query,
                 generation_config=generation_config,
@@ -483,15 +370,12 @@ def analyze_studies(step_2_5_compact_data: str, max_retries: int = 1) -> Analysi
             print(f"🪙 Step 3 Output Tokens: {output_tokens.total_tokens}")
 
             response_json = json.loads(cleaned_json_string)
-            
-            image_base64 = create_forest_plot_base64(step_2_5_compact_data)
-            response_json['details']['plots_image_base64'] = image_base64
-
             return AnalysisResponse.model_validate(response_json)
         except Exception as e:
+            print(f"🔴 Attempt {attempt + 1} failed. Error: {e}")
             last_error = e
             if attempt < max_retries:
-                print(f"Retrying Step 3 due to error: {e}")
+                print("Retrying...")
             else:
                 raise ValueError(f"Step 3 failed after {max_retries + 1} attempts. Last error: {last_error}")
 
@@ -533,15 +417,12 @@ def compose_step_two_query(step_1_result: str) -> str:
         common_persona_prompt
         + " You have been provided with a definitive list of studies below. **Do not search for any other studies or add any studies not on this exact list.**"
         + " For **only** the studies in this list, look up each paper:\n" + step_1_result
-        + "\nThen, extract the following data into a markdown table format. Use these exact column headers: "
-        + "`study_title`, `sample_size_treatment`, `sample_size_comparison`, `cluster_size`, `icc`, `hedges_g`, `study_design`."
-        + "\n1. Study Title"
-        + "\n2. Sample size of treatment group"
-        + "\n3. Sample size of comparison group"
-        + "\n4. Cluster sample sizes (i.e. size of classroom/school)"
-        + "\n5. Intraclass correlation coefficient (ICC). If not provided, impute 0.20."
-        + "\n6. Hedges' g effect size for each outcome (standardized mean difference, adjusted for pre-test if possible)."
-        + "\n7. Study design (RCT, quasi-experimental, or RDD)."
+        + "\nThen, extract the following data into a markdown table format: "
+        + "\n1. Sample size of treatment and comparison groups"
+        + "\n2. Cluster sample sizes (i.e. size of classroom/school)"
+        + "\n3. Intraclass correlation coefficient (ICC). If not provided, impute 0.20."
+        + "\n4. Hedges' g effect size for each outcome (standardized mean difference, adjusted for pre-test if possible)."
+        + "\n5. Study design (RCT, quasi-experimental, or RDD)."
         + "\nReturn only the markdown table and nothing else. **Ensure there is one entry per study from the provided list and no duplicates.**"
     )
 
@@ -559,11 +440,11 @@ def compose_step_three_query(step_2_result: str) -> str:
     json_structure_example = """
 {
   "summary": "A one or two sentence summary of the analysis conclusion.",
-  "confidence": "GREEN",
+  "confidence": "HIGH",
   "details": {
     "process": "A description of the meta-analysis process used.",
     "regression_models": "The specific meta-regression models produced, including coefficients and statistics.",
-    "plots_description": "A textual description of relevant plots, such as a forest plot or funnel plot."
+    "plots": "A textual description of relevant plots, such as a forest plot or funnel plot."
   }
 }
 """
@@ -575,10 +456,10 @@ def compose_step_three_query(step_2_result: str) -> str:
         + f"\n\nHere is an example of the required JSON structure:\n```json\n{json_structure_example}\n```"
         + "\n\nNow, populate this exact JSON structure based on your analysis:"
         + "\n1. For the `summary` field: Write a one or two sentence summary of your conclusion."
-        + "\n2. For the `confidence` field: Determine the confidence level (GREEN, YELLOW, or RED) based on these criteria: " + Confidence.get_description()
+        + "\n2. For the `confidence` field: Determine the confidence level (HIGH, MODERATE, or LOW) based on these criteria: " + Confidence.get_description()
         + "\n3. For the nested `details.process` field: Describe the analysis process you used."
         + "\n4. For the nested `details.regression_models` field: Show the regression models produced."
-        + "\n5. For the nested `details.plots_description` field: Describe any corresponding plots."
+        + "\n5. For the nested `details.plots` field: Describe any corresponding plots."
     )
 
 if __name__ == "__main__":
