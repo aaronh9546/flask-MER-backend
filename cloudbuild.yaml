@@ -1,0 +1,32 @@
+steps:
+# Step 1: Build the container image for the correct platform
+- name: 'gcr.io/cloud-builders/docker'
+  args: [
+    'build',
+    '--platform', 'linux/amd64',
+    '-t', 'us-central1-docker.pkg.dev/${PROJECT_ID}/mer-repo/mer-backend:latest',
+    '.'
+  ]
+
+# Step 2: Push the container image to Artifact Registry
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'us-central1-docker.pkg.dev/${PROJECT_ID}/mer-repo/mer-backend:latest']
+
+# Step 3: Deploy to Cloud Run
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args: [
+    'run', 'deploy', 'mer-backend-service',
+    '--image', 'us-central1-docker.pkg.dev/${PROJECT_ID}/mer-repo/mer-backend:latest',
+    '--region', 'us-central1',
+    '--platform', 'managed'
+  ]
+
+# Store the image in Artifact Registry after a successful build
+images:
+- 'us-central1-docker.pkg.dev/${PROJECT_ID}/mer-repo/mer-backend:latest'
+
+# Increase the timeout to allow for complex builds and deployments
+options:
+  machineType: 'E2_HIGHCPU_8'
+  timeout: '1200s' # 20 minutes
