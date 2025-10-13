@@ -89,10 +89,17 @@ def get_user_id_from_context():
         return get_remote_address
 
 limiter = Limiter(
-    get_user_id_from_context,
+    key_func=get_user_id_from_context,  # per-user limit
     app=app,
-    default_limits=["200 per day", "50 per hour"],
     storage_uri=REDIS_URL,
+    default_limits=["10 per month"],  # per-user monthly limit
+)
+
+ip_limiter = Limiter(
+    key_func=get_remote_address,  # per-IP limit
+    app=app,
+    storage_uri=REDIS_URL,
+    default_limits=["19 per month"],  # per-IP monthly limit
 )
 
 gemini_model = "gemini-2.5-pro"
@@ -245,7 +252,7 @@ def get_result(result_id):
 
 @app.route("/followup", methods=['POST'])
 @token_required
-@limiter.limit("15 per hour")
+@limiter.limit("1 per 5 minutes")
 def followup_api():
     current_user = g.current_user
     print(f"Follow-up request from user: {current_user.email}")
