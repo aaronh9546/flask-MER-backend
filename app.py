@@ -89,17 +89,10 @@ def get_user_id_from_context():
         return get_remote_address
 
 limiter = Limiter(
-    key_func=get_user_id_from_context,  # per-user limit
+    key_func=get_user_id_from_context,
     app=app,
     storage_uri=REDIS_URL,
-    default_limits=["10 per month"],  # per-user monthly limit
-)
-
-ip_limiter = Limiter(
-    key_func=get_remote_address,  # per-IP limit
-    app=app,
-    storage_uri=REDIS_URL,
-    default_limits=["19 per month"],  # per-IP monthly limit
+    # Default limits are removed. Rate limits are now applied only via decorators.
 )
 
 gemini_model = "gemini-2.5-pro"
